@@ -1,0 +1,47 @@
+package com.example.dlqagent.orders;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import com.example.dlqagent.domain.SchemaInspector;
+import java.util.Arrays;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
+
+class OrderSchemaToolsTest {
+
+    private final SchemaInspector inspector = mock(SchemaInspector.class);
+    private final OrderSchemaTools tools = new OrderSchemaTools(inspector, new OrderContractValidator());
+
+    @Test
+    void exposesExactlyTwoReadOnlyTools() {
+        ToolCallback[] callbacks = ToolCallbacks.from(tools);
+
+        assertThat(Arrays.stream(callbacks).map(c -> c.getToolDefinition().name()))
+                .containsExactlyInAnyOrder("describeTable", "validateOrderPayload");
+        assertThat(Arrays.stream(callbacks).map(c -> c.getToolDefinition().inputSchema()))
+                .anyMatch(s -> s.contains("tableName"))
+                .anyMatch(s -> s.contains("json"));
+    }
+
+    @Test
+    void toolCallbackInvokesValidationWithTypedJsonArguments() {
+        ToolCallback validate = Arrays.stream(ToolCallbacks.from(tools))
+                .filter(c -> c.getToolDefinition().name().equals("validateOrderPayload")).findFirst().orElseThrow();
+
+        String result = validate.call("{\"json\": \"{\\\"orderId\\\": \\\"o-1\\\"}\"}");
+
+        assertThat(result).contains("\"valid\":false").contains("customerId is required");
+    }
+
+    @Test
+    void describeTableDelegatesToInspector() {
+        var schema = new SchemaInspector.TableSchema("orders", List.of(), List.of("PRIMARY KEY (order_id)"));
+        when(inspector.describe("orders")).thenReturn(schema);
+
+        assertThat(tools.describeTable("orders")).isSameAs(schema);
+    }
+}

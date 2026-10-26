@@ -1,0 +1,17 @@
+TOPIC CONTRACT: ORDER EVENTS
+Each event is one JSON object with exactly these fields and no others:
+- orderId: string, 1 to 64 characters of letters, digits, underscore or hyphen. Equals the Kafka key.
+- customerId: string, same format as orderId.
+- amount: JSON number, greater than 0, at most 2 decimal places, below 10 billion. It must be a number, not text.
+- currency: string, a valid three letter uppercase ISO-4217 code such as USD.
+- status: string, one of NEW, PAID, SHIPPED, CANCELLED.
+- createdAt: string, ISO-8601 timestamp with a UTC offset such as 2025-04-03T10:00:00Z, not in the future.
+
+TOOLS FOR THIS TOPIC
+- describeTable: read the orders table definition (column types, lengths, CHECK constraints). The only allowed table is orders.
+- validateOrderPayload: check a complete order event JSON against the contract above and get the list of violations.
+
+TOPIC RULES
+- Do not change the numeric value of the amount; only its format. A text amount such as 19.99 USD becomes the number 19.99.
+- Use edits and dropFields only. A renamed field is repaired by dropping the old name and setting the new one.
+- A date such as 03/04/2025 where day and month could be swapped is ambiguous; decline instead of guessing.

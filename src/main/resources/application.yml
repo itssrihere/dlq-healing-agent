@@ -1,0 +1,76 @@
+spring:
+  application:
+    name: dlq-healing-agent
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/dlqagent}
+    username: ${DB_USER:dlqagent}
+    password: ${DB_PASSWORD:dlqagent}
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: dlq-healing-agent
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+    listener:
+      ack-mode: manual
+      observation-enabled: true   # a span per consumed record, continuing the producer's trace
+    template:
+      observation-enabled: true   # a span per published record (the replay)
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:not-set}
+      chat:
+        options:
+          model: ${OPENAI_MODEL:gpt-4o-mini}
+          temperature: 0.0
+
+dlqagent:
+  topics:
+    main: orders-topic
+    dlq: orders-dlq
+    partitions: 3
+  retry:
+    max-attempts: 5
+    initial-delay: 2s
+    multiplier: 2.0
+    max-delay: 5m
+  planner:
+    min-confidence: 0.7
+    max-payload-chars: 4000      # prompt size bound; longer text is truncated
+    max-stack-trace-chars: 2000
+  gate:
+    auto-replay-min-confidence: 0.9   # below this, even a risk-free repair waits for a human (Tier 2)
+  approval:
+    username: ${APPROVAL_USERNAME:reviewer}
+    password: ${APPROVAL_PASSWORD:}   # required: the app refuses to start without it
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0            # this is a low-volume control plane; keep every trace
+  otlp:
+    tracing:
+      endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        enabled: ${TRACING_EXPORT:false}   # spans are always created and linked to audit rows; shipping them is opt-in
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+logging:
+  pattern:
+    level: "%5p [cid=%X{correlationId:-}] [trace=%X{traceId:-}]"
