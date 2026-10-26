@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Size;
 import java.security.Principal;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,7 +17,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Review queue for Tier 2 proposals. Authenticated; the caller's name is recorded as the reviewer. */
+/**
+ * Review queue for Tier 2 proposals. Authenticated; the caller's name is recorded as the reviewer.
+ * The state-changing endpoints accept only {@code application/json} (see SecurityConfig for why).
+ */
 @RestController
 @RequestMapping("/api/approvals")
 class ApprovalController {
@@ -43,13 +47,14 @@ class ApprovalController {
         return ApprovalView.of(service.get(id));
     }
 
-    @PostMapping("/{id}/approve")
-    ApprovalView approve(@PathVariable UUID id, @RequestBody(required = false) @Valid ApproveRequest body,
-                         Principal reviewer) {
-        return ApprovalView.of(service.approve(id, reviewer.getName(), body == null ? null : body.notes()));
+    @PostMapping(path = "/{id}/approve", consumes = MediaType.APPLICATION_JSON_VALUE)
+    ApprovalView approve(@PathVariable UUID id, @RequestBody @Valid ApproveRequest body, Principal reviewer) {
+        // The body is required even though "notes" is optional: a request with no body and no content type is a
+        // "simple" cross-site request that a browser sends without a CORS preflight, so it must never match.
+        return ApprovalView.of(service.approve(id, reviewer.getName(), body.notes()));
     }
 
-    @PostMapping("/{id}/reject")
+    @PostMapping(path = "/{id}/reject", consumes = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<ApprovalView> reject(@PathVariable UUID id, @RequestBody @Valid RejectRequest body,
                                         Principal reviewer) {
         return ResponseEntity.ok(ApprovalView.of(service.reject(id, reviewer.getName(), body.notes())));

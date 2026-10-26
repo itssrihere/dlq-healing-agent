@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs + FindSecBugs exclusions. Every entry is a reviewed decision with its reason; anything not listed here
+  fails the build (mvn verify). Do not add an entry without a reason.
+-->
+<FindBugsFilter>
+
+    <!-- CSRF tokens are disabled on purpose: stateless Basic-auth API for scripts, not a browser app. The real defence
+         is that every state-changing endpoint requires a JSON body and content type, so a cross-site form or a
+         no-cors fetch cannot reach it. See SecurityConfig and ApprovalFlowIT.stateChangingEndpointsOnlyAcceptJson... -->
+    <Match>
+        <Class name="com.example.dlqagent.infrastructure.SecurityConfig"/>
+        <Bug pattern="SPRING_CSRF_PROTECTION_DISABLED"/>
+    </Match>
+
+    <!-- Informational: lists the REST endpoints. They are the intended, authenticated review and audit APIs. -->
+    <Match>
+        <Bug pattern="SPRING_ENDPOINT"/>
+    </Match>
+
+    <!-- False positive: the constructor stores injected singleton collaborators (ObservationRegistry,
+         TransactionTemplate), not caller-owned mutable data. -->
+    <Match>
+        <Class name="com.example.dlqagent.agent.DlqTriageService"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- The prompt is a text block whose line breaks are intentional and must be the same on every platform,
+         so %n (platform line separator) would be wrong. -->
+    <Match>
+        <Class name="com.example.dlqagent.agent.FailurePrompt"/>
+        <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
+    </Match>
+
+    <!-- triage() rethrows the RuntimeException it caught, after recording it on the trace span, so that the Kafka
+         listener retries. Swallowing it would lose the event. -->
+    <Match>
+        <Class name="com.example.dlqagent.agent.DlqTriageService"/>
+        <Method name="triage"/>
+        <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+    </Match>
+
+</FindBugsFilter>

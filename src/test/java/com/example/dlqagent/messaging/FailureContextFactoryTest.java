@@ -54,4 +54,19 @@ class FailureContextFactoryTest {
     void eventIdIsStableForTheSameDlqRecord() {
         assertThat(factory.from(record("a")).eventId()).isEqualTo(factory.from(record("b")).eventId());
     }
+
+    @Test
+    void onlyShortHarmlessCorrelationIdsAreTrusted() {
+        for (String ok : java.util.List.of("cid-123", "a.b_c:d-e", "A".repeat(64))) {
+            var rec = record("x");
+            rec.headers().add(DlqHeaders.CORRELATION_ID, ok.getBytes(StandardCharsets.UTF_8));
+            assertThat(factory.from(rec).correlationId()).isEqualTo(ok);
+        }
+        for (String bad : java.util.List.of("A".repeat(65), "has space", "line\nbreak", "tab\there", "\u0000", "emoji\uD83D\uDE00", "")) {
+            var rec = record("x");
+            rec.headers().add(DlqHeaders.CORRELATION_ID, bad.getBytes(StandardCharsets.UTF_8));
+            assertThat(factory.from(rec).correlationId()).as(bad)
+                    .isNotEqualTo(bad).matches("[0-9a-f-]{36}"); // replaced by a generated UUID
+        }
+    }
 }

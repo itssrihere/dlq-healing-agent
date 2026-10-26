@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
 import org.springframework.stereotype.Component;
@@ -15,6 +16,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class FailureContextFactory {
 
+    private static final Pattern SAFE_CORRELATION_ID = Pattern.compile("[A-Za-z0-9._:-]{1,64}");
+
     private final String defaultOriginalTopic;
 
     public FailureContextFactory(DlqAgentProperties props) {
@@ -22,8 +25,10 @@ public class FailureContextFactory {
     }
 
     public FailureContext from(ConsumerRecord<String, String> record) {
+        // The correlation id ends up in logs, MDC and a bounded column. It comes from a producer, so it is only
+        // trusted if it is short and made of harmless characters; otherwise a fresh one is generated.
         String correlationId = headerText(record, DlqHeaders.CORRELATION_ID);
-        if (correlationId == null || correlationId.isBlank()) {
+        if (correlationId == null || !SAFE_CORRELATION_ID.matcher(correlationId).matches()) {
             correlationId = UUID.randomUUID().toString();
         }
         String originalTopic = headerText(record, DlqHeaders.ORIGINAL_TOPIC);

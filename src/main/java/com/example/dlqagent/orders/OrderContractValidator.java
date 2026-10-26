@@ -199,7 +199,7 @@ public class OrderContractValidator {
         for (String field : List.of("status", "currency")) {
             String before = textOrNull(original.get(field));
             String after = textOrNull(candidate.get(field));
-            if (before != null && after != null && !before.trim().equalsIgnoreCase(after)) {
+            if (before != null && after != null && !asciiEqualsIgnoreCase(before.trim(), after)) {
                 flags.add(field + " mapped from '" + before + "' to '" + after + "'");
             }
         }
@@ -235,6 +235,28 @@ public class OrderContractValidator {
         }
         BigDecimal found = new BigDecimal(m.group());
         return m.find() ? null : found; // two numbers in the text: ambiguous
+    }
+
+    /**
+     * Case-insensitive for ASCII letters only. {@code String.equalsIgnoreCase} applies Unicode case rules, under
+     * which for example the long s ("ſhipped") equals "SHIPPED", so a real remapping would pass as mere formatting.
+     */
+    static boolean asciiEqualsIgnoreCase(String a, String b) {
+        if (a.length() != b.length()) {
+            return false;
+        }
+        for (int i = 0; i < a.length(); i++) {
+            char x = a.charAt(i);
+            char y = b.charAt(i);
+            if (x != y && !(isAsciiLetter(x) && isAsciiLetter(y) && (x | 0x20) == (y | 0x20))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAsciiLetter(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
     }
 
     private static OrderEvent toEvent(ObjectNode n) {

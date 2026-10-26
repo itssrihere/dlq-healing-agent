@@ -48,7 +48,7 @@ class PatchApplierTest {
     void decimalIsWrittenAsPlainNumber() throws Exception {
         ObjectNode patched = applier.apply(adapter, original, proposal(List.of(new FieldEdit("amount", "1000")), List.of()));
 
-        assertThat(StrictJson.mapper().writeValueAsString(patched)).contains("\"amount\":1000").doesNotContain("E+");
+        assertThat(StrictJson.write(patched)).contains("\"amount\":1000").doesNotContain("E+");
     }
 
     @Test

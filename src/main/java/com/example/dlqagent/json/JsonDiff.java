@@ -31,9 +31,12 @@ public final class JsonDiff {
 
     /** Like {@link #diff(ObjectNode, ObjectNode)} but returns an empty list if either side is not a JSON object. */
     public static List<FieldChange> diffOrEmpty(String before, String after) {
+        if (before == null || after == null) {
+            return List.of();
+        }
         try {
             return diff(StrictJson.parseObject(before), StrictJson.parseObject(after));
-        } catch (IllegalArgumentException | NullPointerException e) {
+        } catch (IllegalArgumentException e) {
             return List.of();
         }
     }

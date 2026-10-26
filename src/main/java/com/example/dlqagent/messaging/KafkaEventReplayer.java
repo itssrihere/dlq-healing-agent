@@ -2,6 +2,7 @@ package com.example.dlqagent.messaging;
 
 import com.example.dlqagent.domain.EventReplayer;
 import com.example.dlqagent.domain.ReplayRequest;
+import com.example.dlqagent.observability.LogSafe;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.nio.charset.StandardCharsets;
@@ -61,8 +62,8 @@ class KafkaEventReplayer implements EventReplayer {
 
         try {
             var result = kafka.send(record).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            log.info("Replayed repaired event topic={} partition={} offset={} approvedBy={}", request.topic(),
-                    result.getRecordMetadata().partition(), result.getRecordMetadata().offset(), request.approvedBy());
+            log.info("Replayed repaired event topic={} partition={} offset={} approvedBy={}", LogSafe.clean(request.topic()),
+                    result.getRecordMetadata().partition(), result.getRecordMetadata().offset(), LogSafe.clean(request.approvedBy()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while replaying event", e);

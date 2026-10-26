@@ -2,6 +2,7 @@ package com.example.dlqagent.messaging;
 
 import com.example.dlqagent.agent.DlqTriageService;
 import com.example.dlqagent.domain.FailureContext;
+import com.example.dlqagent.observability.LogSafe;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +35,7 @@ class DlqListener {
         MDC.put(MDC_CORRELATION_ID, ctx.correlationId());
         try {
             log.info("Received DLQ event topic={} partition={} offset={}",
-                    record.topic(), record.partition(), record.offset());
+                    LogSafe.clean(record.topic()), record.partition(), record.offset());
             triage.triage(ctx);
             ack.acknowledge();
         } finally {

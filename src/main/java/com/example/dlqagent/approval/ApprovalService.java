@@ -11,6 +11,7 @@ import com.example.dlqagent.domain.QuarantineStatus;
 import com.example.dlqagent.domain.ReplayRequest;
 import com.example.dlqagent.domain.TopicAdapter;
 import com.example.dlqagent.json.JsonDiff;
+import com.example.dlqagent.observability.LogSafe;
 import com.example.dlqagent.observability.TraceContext;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -139,7 +140,7 @@ public class ApprovalService {
     private static void logDecision(String what, QuarantineRecord rec, String reviewer) {
         MDC.put("correlationId", rec.correlationId());
         try {
-            log.info("Tier 2 proposal {} id={} reviewer={}", what, rec.id(), reviewer);
+            log.info("Tier 2 proposal {} id={} reviewer={}", LogSafe.clean(what), LogSafe.clean(rec.id()), LogSafe.clean(reviewer));
         } finally {
             MDC.remove("correlationId");
         }

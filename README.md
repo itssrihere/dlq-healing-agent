@@ -13,6 +13,7 @@ An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It list
 - [Tech stack](#tech-stack)
 - [Project layout](#project-layout)
 - [Audit log and observability](#audit-log-and-observability)
+- [Static analysis and hardening](#static-analysis-and-hardening)
 - [Running it](#running-it)
 - [Testing](#testing)
 - [Configuration](#configuration)
@@ -176,14 +177,14 @@ Tier 2 rows are reviewed through a small REST API, protected by HTTP Basic auth 
 |---|---|
 | `GET /api/approvals?status=PENDING_HUMAN_APPROVAL&limit=50` | The review queue (default status shown; any status can be listed; limit capped at 100) |
 | `GET /api/approvals/{id}` | One item: original and proposed payload, **field-level diff**, risk flags, repair summary, reason |
-| `POST /api/approvals/{id}/approve` body `{"notes": "..."}` (notes optional) | Re-runs the hard checks on the stored proposal, replays it, marks it `APPROVED_REPLAYED` |
+| `POST /api/approvals/{id}/approve` JSON body, `{}` or `{"notes": "..."}` (a body is required, notes are optional) | Re-runs the hard checks on the stored proposal, replays it, marks it `APPROVED_REPLAYED` |
 | `POST /api/approvals/{id}/reject` body `{"notes": "..."}` (notes **required**) | Marks it `REJECTED`; nothing is replayed |
 
 ```bash
 export APPROVAL_PASSWORD=choose-something
 curl -u reviewer:$APPROVAL_PASSWORD localhost:8080/api/approvals
 curl -u reviewer:$APPROVAL_PASSWORD -X POST localhost:8080/api/approvals/<id>/approve \
-     -H 'Content-Type: application/json' -d '{"notes":"confirmed day-first with the customer"}'
+     -H 'Content-Type: application/json' -d '{"notes":"confirmed day-first with the customer"}'   # a JSON body is mandatory; '{}' is enough
 ```
 
 Behaviour worth knowing:
@@ -191,7 +192,7 @@ Behaviour worth knowing:
 - **No double replay:** each decision runs in one transaction holding a row lock (`SELECT ... FOR UPDATE`). Two simultaneous approvals produce one `200` and one `409`, and exactly one replayed record (tested).
 - **Broker failure:** if Kafka does not acknowledge the replay, the API returns `502` and the item stays pending.
 - **Status codes:** `401` no or wrong credentials, `404` unknown id, `409` wrong state or failed re-validation, `400` malformed input.
-- **Security:** everything except `/actuator/health` and `/api/approvals/**` is denied. CSRF is disabled because the API is stateless Basic auth with no cookies or sessions. There is a single reviewer account whose password has no default (`APPROVAL_PASSWORD`); the app refuses to start without it.
+- **Security:** everything except `/actuator/health`, `/api/approvals/**` and `/api/audit/**` is denied. CSRF tokens are off because this is a stateless Basic-auth API for scripts, but note that a browser can cache Basic credentials and resend them cross-site, so "no cookies" is *not* a defence by itself. The defence is that every state-changing endpoint accepts only `application/json` **with a body**: a cross-site HTML form cannot send that content type, and a cross-site `fetch` with it needs a CORS preflight, which this service never approves. (An earlier version let approve take an optional body, so a body-less cross-site POST would have been accepted; the SAST work found and closed that, see below.) There is a single reviewer account whose password has no default (`APPROVAL_PASSWORD`); the app refuses to start without it.
 
 Security limitations to be aware of: HTTP Basic sends credentials with every request, so it must run behind TLS in any real deployment; there is no rate limiting or lockout; and one shared account means "who approved" is only as granular as the account. A production system would use OIDC with individual identities.
 
@@ -199,6 +200,8 @@ Security limitations to be aware of: HTTP Basic sends credentials with every req
 - **No event loss:** the offset is committed only after triage succeeds. If Postgres is down, the listener retries with exponential backoff (1s doubling to 30s, unbounded) and does not skip the record.
 - **Idempotent:** the quarantine row ID is derived from `dlqTopic + partition + offset`, and the insert uses `ON CONFLICT DO NOTHING`, so redelivery never creates duplicates.
 - **Hostile payloads:** Postgres cannot store NUL (`U+0000`) in `text` or `jsonb`. Such a payload is quarantined with the NUL replaced by `U+FFFD`, rather than failing the insert and blocking the partition. A null (tombstone) value is stored as an empty payload.
+- **Hostile headers and keys:** Kafka keys and the original-topic header are producer-controlled and unbounded, and the listener retries a failing insert forever, so a value the database rejects would block its partition permanently (reproduced in a test before the fix, where it also stalled an unrelated event behind it on the same partition). Those columns are therefore `TEXT` (V6), and the key is stored whole because replay needs the exact key. The correlation id, the one value that lives in a bounded column, goes through a boundary check: only `[A-Za-z0-9._:-]{1,64}` is trusted, anything else (too long, spaces, line breaks, control characters) is replaced by a generated UUID.
+- **Log injection:** untrusted text (payload-derived reasons, exception messages, model output, header values) is passed through `LogSafe.clean` before it reaches a log line: control characters, including CR, LF and the Unicode line separators, become `_`, and the length is capped at 500.
 
 ## Audit log and observability
 
@@ -238,6 +241,25 @@ docker compose --profile tracing up -d       # adds Jaeger (UI http://localhost:
 TRACING_EXPORT=true mvn spring-boot:run      # OTLP_TRACING_ENDPOINT overrides the collector URL
 ```
 Log lines also carry `[trace=...]` next to `[cid=...]`. Sampling is 100% because this is a low-volume control plane. Every `Observation` also feeds Micrometer timers (for example `dlq.triage` tagged by outcome and tier), but no metrics endpoint is exposed yet.
+
+## Static analysis and hardening
+`mvn verify` runs **SpotBugs with the FindSecBugs security rules** (effort Max, threshold Low) after the tests and **fails the build on any finding**. The only things allowed through are the entries in `spotbugs-exclude.xml`, each with its reason written next to it: the deliberate CSRF decision, informational endpoint listings, a constructor that stores injected collaborators, an intentional text-block newline, and a rethrow that must not be swallowed.
+
+The first scan found 31 findings. Triage, honestly:
+
+| Finding | Verdict | What was done |
+|---|---|---|
+| `SPRING_CSRF_PROTECTION_DISABLED` | **Real, and my reasoning was wrong.** I had justified it with "no cookies, so no ambient credential", which is false for browsers and Basic auth. A new test then showed a body-less cross-site POST to `approve` was accepted | State-changing endpoints require a JSON body and content type; justification corrected; covered by `ApprovalFlowIT` |
+| `CRLF_INJECTION_LOGS` (8) | **Real**: payload-, model- and header-derived text was logged raw | `LogSafe.clean` at every site; correlation ids validated at the boundary |
+| Oversized key or header values (found while triaging the logging findings, not reported by SpotBugs) | **Real, severe**: a value over a column limit would fail the insert forever and block the partition | Columns widened to `TEXT`, correlation id validated, test added that fails without the fix |
+| `IMPROPER_UNICODE` | **Real**: `equalsIgnoreCase` treats the long s as an `s`, so a status of `ſhipped` counted as a harmless case change and could reach Tier 1 | ASCII-only case comparison; test added |
+| `DCN_NULLPOINTER_EXCEPTION` | Fair: code caught `NullPointerException` instead of checking for null | Explicit null check |
+| `EI_EXPOSE_REP` and `REP2` (10) | Mixed: several records stored mutable collections or maps without copying; the rest were injected beans | Defensive copies in three records; injected-bean case excluded with a reason |
+| `MS_EXPOSE_REP` | Real but minor: a shared, mutable `ObjectMapper` was exposed | Mapper hidden behind `StrictJson.write` |
+| `CT_CONSTRUCTOR_THROW` (2) | Theoretical (finalizer attacks) | Classes made `final` |
+| `SPRING_ENDPOINT`, `THROWS_METHOD_THROWS_RUNTIMEEXCEPTION`, `VA_FORMAT_STRING_USES_NEWLINE` | Informational or intentional | Excluded, with reasons |
+
+What this does **not** cover: dependency vulnerabilities (a software-composition scan such as OWASP Dependency-Check or Dependabot is on the roadmap), runtime or dynamic testing, secrets scanning, or the LLM-specific risks, which are handled by design (typed tools, the deterministic gate, the human tier) and by the prompt-injection tests rather than by a scanner.
 
 ## Architecture
 
@@ -281,7 +303,8 @@ The LLM only proposes. It never executes.
 ```
 dlq-healing-agent/
 ├── pom.xml                         Maven build; LLM provider profiles; Failsafe for *IT tests
-├── docker-compose.yml              Local Kafka (KRaft) and PostgreSQL
+├── docker-compose.yml              Local Kafka (KRaft) and PostgreSQL (+ optional Jaeger)
+├── spotbugs-exclude.xml            reviewed SAST exclusions, each with its reason
 ├── src/main/java/com/example/dlqagent/
 │   ├── DlqAgentApplication.java
 │   ├── domain/
@@ -312,7 +335,7 @@ dlq-healing-agent/
 │   │   ├── OrderSchemaTools          the two read-only @Tool methods
 │   │   └── OrderEvent / OrderStatus  the order contract
 │   ├── audit/AuditController         GET /api/audit?correlationId=
-│   ├── observability/TraceContext    current trace id, for audit rows
+│   ├── observability/                TraceContext (trace id for audit rows), LogSafe (log-injection guard)
 │   ├── approval/                     human review of Tier 2 proposals
 │   │   ├── ApprovalController        REST: list, get, approve, reject
 │   │   ├── ApprovalService           transactional, row-locked decisions; re-validates on approve
@@ -337,7 +360,7 @@ dlq-healing-agent/
 │   ├── prompts/planner-system.txt  planner system prompt
 │   ├── prompts/repair-system.txt   generic repair agent instructions
 │   ├── prompts/orders-contract.txt order contract, tools and rules shown to the repair model
-│   └── db/migration/               V1 quarantine_event, V2 retry_schedule, V3 orders, V4 tier-2 columns, V5 dlq_audit_log
+│   └── db/migration/               V1 quarantine_event, V2 retry_schedule, V3 orders, V4 tier-2 columns, V5 dlq_audit_log, V6 unbounded text columns
 └── src/test/java/com/example/dlqagent/
     ├── AbstractIntegrationTest.java  shared Testcontainers base class
     ├── InfrastructureSmokeIT.java    tables, topics, config binding
@@ -411,7 +434,7 @@ mvn verify        # unit tests (*Test) in `test`, Testcontainers tests (*IT) in 
 
 Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch `docker-compose` and never call a real LLM (the API key is a dummy value).
 
-Current coverage (110 unit and 30 integration tests passing; 6 live-LLM tests skipped by default):
+Current coverage (118 unit and 33 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
 - `InfrastructureSmokeIT`: Flyway creates both tables, both topics exist, configuration binds.
 - `QuarantineFlowIT`: a corrupt event published to `orders-dlq` (with correlation ID, original-topic and stack-trace headers) appears in `quarantine_event` with all metadata; saving the same record twice writes one row; a NUL-containing payload is sanitized and stored.
 - `SpringAiRemediationPlannerTest` (13 tests, scripted `ChatModel`): each strategy maps correctly; low, out-of-range and threshold-boundary confidence; unknown strategy, non-JSON and missing fields; model exceptions; JSON braces in the payload do not break the template; prompt contents, truncation and fencing; a prompt-injection payload stays inside the data fence.
@@ -422,6 +445,7 @@ Current coverage (110 unit and 30 integration tests passing; 6 live-LLM tests sk
 - `OrderSchemaToolsTest`: exactly two tools are exposed with the expected typed schemas; the generated tool callback works.
 - `JdbcSchemaInspectorIT`: reads the real catalog; refuses non-allow-listed tables, injection strings and `pg_catalog`.
 - `DlqTriageServiceTest` (19 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B fail-closed.
+- Hardening tests: `QuarantineFlowIT` sends a 300-character key, a 100-character correlation id and a 300-character original-topic header and requires a quarantine row (not a stalled partition); `ApprovalFlowIT` proves form, `text/plain` and body-less POSTs to approve and reject are refused with 415 or 400 and change nothing; `LogSafeTest`, `FailureContextFactoryTest` (which correlation ids are trusted), `OrderContractValidatorTest` (Unicode look-alikes) and an immutability test for the records.
 - `RecordingToolCallbackTest`: records name, success and duration, rethrows failures unchanged, never keeps arguments or results.
 - `AuditFlowIT` (10 tests, real Kafka, Postgres and OpenTelemetry spans): audit rows for Tier 1, poison pills, Tier 2 and both human decisions (including the same `event_id` across stages and the `/api/audit` view); the table rejects `UPDATE` and `DELETE`; NUL characters in audit content are sanitized; recording twice writes one row; **a failing audit write rolls the quarantine row back**; and one trace links the Kafka consume, plan, repair, both Spring AI chat-client spans, the replay and the audit row's `trace_id`.
 - `ApprovalServiceTest` and `JsonDiffTest`: only pending approvals can be decided, approve re-runs the hard checks, a failed replay leaves the item pending, reject never replays, limit clamping, field-level diff.
@@ -535,4 +559,4 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 7 | Strategy B: health-check tool, backoff scheduler and poller; circuit breaker against replay loops | Planned |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
-| 10 (idea) | **CI and packaging.** GitHub Actions workflow running `mvn verify` (Testcontainers works on the standard Ubuntu runners) with a status badge, a Maven wrapper (`mvnw`) so no local Maven is needed, and a license if the repo is ever made public | Backlog |
+| 10 (idea) | **CI and supply chain.** GitHub Actions running `mvn verify` (which already includes SpotBugs/FindSecBugs; Testcontainers works on the standard Ubuntu runners) with a status badge; dependency vulnerability scanning (Dependabot, or OWASP Dependency-Check); a Maven wrapper (`mvnw`); a license if the repo is ever made public | Backlog |

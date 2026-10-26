@@ -15,6 +15,7 @@ import com.example.dlqagent.domain.RepairResult;
 import com.example.dlqagent.domain.ReplayRequest;
 import com.example.dlqagent.domain.ToolCallRecord;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
+import com.example.dlqagent.observability.LogSafe;
 import com.example.dlqagent.observability.TraceContext;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -154,14 +155,14 @@ public class DlqTriageService {
                     replayer.replay(ReplayRequest.automatic(ctx, r));
                     record(ctx, d, AuditEntry.Tier.TIER_1, AuditEntry.Outcome.REPLAYED, r.summary(), List.of());
                     log.info("Tier 1: repaired and replayed event topic={} confidence={} summary={}",
-                            ctx.originalTopic(), r.confidence(), r.summary());
+                            LogSafe.clean(ctx.originalTopic()), r.confidence(), LogSafe.clean(r.summary()));
                 } else {
                     String reason = "Awaiting human approval: " + String.join("; ", why);
                     QuarantineRecord held = QuarantineRecord.awaitingApproval(ctx, r, reason);
                     AuditEntry entry = entry(ctx, d, RemediationStrategy.SCHEMA_DRIFT, AuditEntry.Tier.TIER_2,
                             AuditEntry.Outcome.HELD_FOR_APPROVAL, reason, r.riskFlags());
                     boolean written = saveAtomically(held, entry);
-                    log.info("Tier 2: repair held for approval newRow={} reasons={}", written, why);
+                    log.info("Tier 2: repair held for approval newRow={} reasons={}", written, LogSafe.clean(why));
                 }
             }
         }
@@ -190,7 +191,7 @@ public class DlqTriageService {
             RemediationPlan plan = step("dlq.plan", ctx, () -> planner.plan(ctx));
             return plan != null ? plan : new RemediationPlan.Quarantine("Planner returned no plan");
         } catch (RuntimeException e) {
-            log.warn("Planner failed, quarantining event", e);
+            log.warn("Planner failed, quarantining event: {}", LogSafe.clean(e));
             return new RemediationPlan.Quarantine("Planner failed: " + e.getClass().getSimpleName());
         }
     }
@@ -200,7 +201,7 @@ public class DlqTriageService {
             RepairResult result = step("dlq.repair", ctx, () -> repairer.repair(ctx));
             return result != null ? result : new RepairResult.Unrepairable("Repairer returned no result");
         } catch (RuntimeException e) {
-            log.warn("Repairer failed, quarantining event", e);
+            log.warn("Repairer failed, quarantining event: {}", LogSafe.clean(e));
             return new RepairResult.Unrepairable("Repairer failed: " + e.getClass().getSimpleName());
         }
     }
@@ -216,7 +217,7 @@ public class DlqTriageService {
         AuditEntry entry = entry(ctx, d, strategy, AuditEntry.Tier.NONE, AuditEntry.Outcome.QUARANTINED, reason, List.of());
         boolean written = saveAtomically(held, entry);
         log.info("Quarantined event strategy={} newRow={} originalTopic={} reason={}",
-                strategy, written, ctx.originalTopic(), reason);
+                LogSafe.clean(strategy), written, LogSafe.clean(ctx.originalTopic()), LogSafe.clean(reason));
     }
 
     /** Quarantine row and its audit row commit together or not at all. */

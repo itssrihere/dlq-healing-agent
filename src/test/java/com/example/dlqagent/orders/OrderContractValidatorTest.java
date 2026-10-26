@@ -217,4 +217,18 @@ class OrderContractValidatorTest {
         assertThat(result.passed()).isFalse();
         assertThat(result.riskFlags()).isEmpty();
     }
+
+    @Test
+    void unicodeLookalikesAreAMappingNotACaseChange() {
+        // "\u017Fhipped" starts with a long s: String.equalsIgnoreCase says it equals "SHIPPED", which would hide a
+        // real remapping as formatting and let it through to Tier 1.
+        String longS = VALID.replace("\"PAID\"", "\"\u017Fhipped\"");
+        String shipped = VALID.replace("\"PAID\"", "\"SHIPPED\"");
+
+        assertThat(evaluate(longS, shipped).riskFlags()).anyMatch(v -> v.contains("status mapped"));
+        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("shipped", "SHIPPED")).isTrue();
+        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("\u017Fhipped", "SHIPPED")).isFalse();
+        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("u\u017Fd", "USD")).isFalse();
+        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("USD", "USDX")).isFalse();
+    }
 }

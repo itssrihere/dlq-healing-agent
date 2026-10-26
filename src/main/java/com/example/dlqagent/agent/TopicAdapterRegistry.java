@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 
 /** Resolves the adapter for a topic. A topic without an adapter cannot be repaired. */
 @Component
-public class TopicAdapterRegistry {
+public final class TopicAdapterRegistry {
 
     private final Map<String, TopicAdapter> byTopic = new HashMap<>();
 

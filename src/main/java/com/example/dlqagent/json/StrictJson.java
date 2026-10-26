@@ -24,8 +24,13 @@ public final class StrictJson {
 
     private StrictJson() {}
 
-    public static ObjectMapper mapper() {
-        return MAPPER;
+    /** Serializes with the same settings (plain-notation decimals). The shared mapper itself is not exposed. */
+    public static String write(JsonNode node) {
+        try {
+            return MAPPER.writeValueAsString(node);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("cannot serialize JSON: " + e.getOriginalMessage(), e);
+        }
     }
 
     /** @throws IllegalArgumentException if the text is not a single, well-formed JSON object */

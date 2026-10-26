@@ -29,6 +29,7 @@ public record QuarantineRecord(
         String reviewNotes) {
 
     public QuarantineRecord {
+        headers = headers == null ? Map.of() : Map.copyOf(headers);
         riskFlags = riskFlags == null ? List.of() : List.copyOf(riskFlags);
     }
 

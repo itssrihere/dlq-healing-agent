@@ -4,6 +4,7 @@ import com.example.dlqagent.domain.FailureContext;
 import com.example.dlqagent.domain.RemediationPlan;
 import com.example.dlqagent.domain.RemediationPlanner;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
+import com.example.dlqagent.observability.LogSafe;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -50,7 +51,7 @@ class SpringAiRemediationPlanner implements RemediationPlanner {
                     .entity(PlannerDecision.class);
             return toPlan(decision);
         } catch (RuntimeException e) {
-            log.warn("Planner call failed, quarantining: {}", e.toString());
+            log.warn("Planner call failed, quarantining: {}", LogSafe.clean(e));
             return new RemediationPlan.Quarantine("Planner call failed: " + e.getClass().getSimpleName());
         }
     }

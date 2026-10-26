@@ -160,7 +160,7 @@ class ApprovalFlowIT extends AbstractIntegrationTest {
         assertThat(MainTopicReader.header(r, "x-repair-summary")).isEqualTo("assumed day first");
         assertThat(MainTopicReader.header(r, "tenant")).isEqualTo("acme");
 
-        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER))
+        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER).contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isConflict());
         mvc.perform(post("/api/approvals/" + seed[0] + "/reject").with(REVIEWER)
                         .contentType(MediaType.APPLICATION_JSON).content("{\"notes\":\"too late\"}"))
@@ -186,7 +186,7 @@ class ApprovalFlowIT extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.reviewedBy").value("reviewer"));
 
         assertThat(MainTopicReader.read(KAFKA.getBootstrapServers(), seed[1], Duration.ofSeconds(3))).isEmpty();
-        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER)).andExpect(status().isConflict());
+        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER).contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isConflict());
     }
 
     @Test
@@ -196,7 +196,7 @@ class ApprovalFlowIT extends AbstractIntegrationTest {
         jdbc.sql("UPDATE quarantine_event SET proposed_payload = replace(proposed_payload, '19.99', '99.99') "
                 + "WHERE id = CAST(:id AS uuid)").param("id", seed[0]).update();
 
-        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER))
+        mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER).contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error").value(org.hamcrest.Matchers.containsString("amount value changed")));
 
@@ -205,9 +205,30 @@ class ApprovalFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void stateChangingEndpointsOnlyAcceptJsonSoACrossSiteFormCannotApprove() throws Exception {
+        String[] seed = seedTier2();
+        String approve = "/api/approvals/" + seed[0] + "/approve";
+        String reject = "/api/approvals/" + seed[0] + "/reject";
+
+        // What a forged cross-site HTML form (or a text/plain fetch) can send: never application/json.
+        mvc.perform(post(approve).with(REVIEWER).contentType(MediaType.APPLICATION_FORM_URLENCODED).content("x=1"))
+                .andExpect(status().isUnsupportedMediaType());
+        mvc.perform(post(approve).with(REVIEWER).contentType(MediaType.TEXT_PLAIN).content("{}"))
+                .andExpect(status().isUnsupportedMediaType());
+        // The loophole a body-less cross-site fetch would use: no content type and no body at all.
+        mvc.perform(post(approve).with(REVIEWER)).andExpect(status().isUnsupportedMediaType());
+        mvc.perform(post(approve).with(REVIEWER).contentType(MediaType.APPLICATION_JSON)).andExpect(status().isBadRequest());
+        mvc.perform(post(reject).with(REVIEWER).contentType(MediaType.APPLICATION_FORM_URLENCODED).content("notes=x"))
+                .andExpect(status().isUnsupportedMediaType());
+
+        assertThat(statusOf(seed[0])).isEqualTo("PENDING_HUMAN_APPROVAL");
+        assertThat(MainTopicReader.read(KAFKA.getBootstrapServers(), seed[1], Duration.ofSeconds(3))).isEmpty();
+    }
+
+    @Test
     void unknownIdsAndMalformedRequestsAreHandledCleanly() throws Exception {
         mvc.perform(get("/api/approvals/" + UUID.randomUUID()).with(REVIEWER)).andExpect(status().isNotFound());
-        mvc.perform(post("/api/approvals/" + UUID.randomUUID() + "/approve").with(REVIEWER)).andExpect(status().isNotFound());
+        mvc.perform(post("/api/approvals/" + UUID.randomUUID() + "/approve").with(REVIEWER).contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isNotFound());
         mvc.perform(get("/api/approvals/not-a-uuid").with(REVIEWER)).andExpect(status().isBadRequest());
         mvc.perform(get("/api/approvals?status=NOPE").with(REVIEWER)).andExpect(status().isBadRequest());
     }
@@ -219,7 +240,7 @@ class ApprovalFlowIT extends AbstractIntegrationTest {
         try {
             List<Callable<Integer>> clicks = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
-                clicks.add(() -> mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER))
+                clicks.add(() -> mvc.perform(post("/api/approvals/" + seed[0] + "/approve").with(REVIEWER).contentType(MediaType.APPLICATION_JSON).content("{}"))
                         .andReturn().getResponse().getStatus());
             }
             List<Integer> codes = new ArrayList<>();

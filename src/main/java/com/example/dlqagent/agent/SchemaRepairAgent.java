@@ -10,7 +10,6 @@ import com.example.dlqagent.domain.TopicAdapter;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
 import com.example.dlqagent.json.JsonDiff;
 import com.example.dlqagent.json.StrictJson;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import com.example.dlqagent.observability.LogSafe;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -34,7 +34,7 @@ import org.springframework.stereotype.Component;
  * {@link RepairResult.Unrepairable} (never throws), which the triage service quarantines.
  */
 @Component
-class SchemaRepairAgent implements PayloadRepairer {
+final class SchemaRepairAgent implements PayloadRepairer {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaRepairAgent.class);
     private static final int MAX_SUMMARY_CHARS = 500;
@@ -88,7 +88,7 @@ class SchemaRepairAgent implements PayloadRepairer {
                     .call()
                     .entity(PatchProposal.class);
         } catch (RuntimeException e) {
-            log.warn("Repair agent call failed: {}", e.toString());
+            log.warn("Repair agent call failed: {}", LogSafe.clean(e));
             return new RepairResult.Unrepairable("Repair agent call failed: " + e.getClass().getSimpleName(),
                     null, null, toolCalls, List.of());
         }
@@ -114,8 +114,8 @@ class SchemaRepairAgent implements PayloadRepairer {
 
         String candidate;
         try {
-            candidate = StrictJson.mapper().writeValueAsString(patched);
-        } catch (JsonProcessingException e) {
+            candidate = StrictJson.write(patched);
+        } catch (IllegalArgumentException e) {
             return new RepairResult.Unrepairable("Patched payload could not be serialized", summary, raw, toolCalls, List.of());
         }
         List<FieldChange> changes = JsonDiff.diff(original, patched);

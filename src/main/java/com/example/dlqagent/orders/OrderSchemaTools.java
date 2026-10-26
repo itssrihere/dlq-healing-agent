@@ -13,7 +13,12 @@ import org.springframework.stereotype.Component;
 @Component
 public class OrderSchemaTools {
 
-    public record ValidationReport(boolean valid, List<String> violations) {}
+    public record ValidationReport(boolean valid, List<String> violations) {
+
+        public ValidationReport {
+            violations = List.copyOf(violations);
+        }
+    }
 
     private final SchemaInspector inspector;
     private final OrderContractValidator validator;

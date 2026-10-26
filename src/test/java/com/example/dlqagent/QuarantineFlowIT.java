@@ -53,6 +53,46 @@ class QuarantineFlowIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void oversizedKeyAndHeaderValuesAreQuarantinedInsteadOfBlockingThePartition() throws Exception {
+        // The consumer retries failed inserts forever, so any value the database rejects would block its
+        // partition for good. Keys and headers are producer-controlled, so none of them may be able to do that.
+        String key = "k".repeat(300) + UUID.randomUUID();
+        var record = new ProducerRecord<>("orders-dlq", key, "{\"orderId\": corrupt");
+        record.headers().add("x-correlation-id", ("c".repeat(100)).getBytes(StandardCharsets.UTF_8));
+        record.headers().add("kafka_dlt-original-topic", ("t".repeat(300)).getBytes(StandardCharsets.UTF_8));
+
+        kafka.send(record).get();
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(jdbc.sql("SELECT count(*) FROM quarantine_event WHERE kafka_key = :k")
+                        .param("k", key).query(Integer.class).single()).isEqualTo(1));
+        Map<String, Object> row = jdbc.sql("SELECT * FROM quarantine_event WHERE kafka_key = :k")
+                .param("k", key).query().singleRow();
+        assertThat(row.get("kafka_key").toString()).hasSize(key.length()); // the key is stored whole: replay needs it exactly
+        assertThat(row.get("correlation_id").toString()).hasSizeLessThanOrEqualTo(64)
+                .isNotEqualTo("c".repeat(100)); // an unusable correlation id is replaced, not trusted
+        assertThat(row.get("original_topic").toString()).hasSize(300);
+        assertThat(jdbc.sql("SELECT count(*) FROM dlq_audit_log WHERE kafka_key = :k")
+                .param("k", key).query(Integer.class).single()).isEqualTo(1);
+    }
+
+    @Test
+    void correlationIdsWithControlCharactersOrOddSymbolsAreReplaced() throws Exception {
+        String key = "o-" + UUID.randomUUID();
+        var record = new ProducerRecord<>("orders-dlq", key, "garbage");
+        record.headers().add("x-correlation-id", "fake\nINFO forged log line".getBytes(StandardCharsets.UTF_8));
+        record.headers().add("kafka_dlt-original-topic", "orders-topic".getBytes(StandardCharsets.UTF_8));
+
+        kafka.send(record).get();
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                assertThat(jdbc.sql("SELECT count(*) FROM quarantine_event WHERE kafka_key = :k")
+                        .param("k", key).query(Integer.class).single()).isEqualTo(1));
+        assertThat(jdbc.sql("SELECT correlation_id FROM quarantine_event WHERE kafka_key = :k")
+                .param("k", key).query(String.class).single()).matches("[0-9a-f-]{36}"); // a generated UUID
+    }
+
+    @Test
     void savingTheSameRecordTwiceWritesOneRow() {
         var rec = new QuarantineRecord(UUID.randomUUID(), "cid-dup", "orders-topic", null, "p", Map.of(),
                 null, RemediationStrategy.POISON_PILL, "r", QuarantineStatus.PENDING_REVIEW, Instant.now(),
