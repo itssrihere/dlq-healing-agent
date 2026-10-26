@@ -1,0 +1,29 @@
+# Grype configuration for scripts/sca.sh. Every ignore needs a reason and is reviewed whenever Spring Boot or
+# Spring AI is upgraded. The gate fails on anything High or above that is not listed here.
+fail-on-severity: high
+
+ignore:
+  # Spring Framework 6.2.19 (the newest 6.2.x release; no fixed version exists yet). None of the affected
+  # features are used by this service: no XsltView (CVE-2026-47884), no Server-Sent-Events rendering
+  # (CVE-2026-47890), and no WebFlux functional endpoints / RouterFunction (CVE-2026-47892). WebFlux is only on the
+  # classpath because Spring AI's HTTP client needs it. Re-check on every Spring Boot patch release.
+  - vulnerability: GHSA-pc63-qcmh-9cmg
+    package:
+      name: spring-webmvc
+  - vulnerability: GHSA-j9f9-w8pj-32f8
+    package:
+      name: spring-webmvc
+  - vulnerability: GHSA-j9f9-w8pj-32f8
+    package:
+      name: spring-webflux
+  - vulnerability: GHSA-9qf2-26p9-2q2q
+    package:
+      name: spring-webflux
+
+  # MCP Java SDK 0.18.3: DNS rebinding in the MCP server transport (CVE-2026-35568). This service neither runs
+  # nor connects to any MCP server; the library arrives transitively through spring-ai-client-chat. The fixed
+  # version (1.0.0) is a major jump that Spring AI 1.1.8 was not built against, so it is not safe to force.
+  # Revisit when upgrading Spring AI.
+  - vulnerability: GHSA-8jxr-pr72-r468
+    package:
+      name: mcp-core

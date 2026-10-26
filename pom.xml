@@ -20,6 +20,17 @@
     <properties>
         <java.version>21</java.version>
         <spring-ai.version>1.1.8</spring-ai.version>
+
+        <!--
+            Security overrides of versions that Spring Boot manages. Boot 3.5.16 ships the older ones, which the
+            software-composition scan (Syft + Grype, see README) reports as vulnerable; the newer patch releases fix
+            them and are drop-in. Remove an override once Boot's own managed version has caught up.
+        -->
+        <tomcat.version>10.1.61</tomcat.version>              <!-- auth bypass / access control advisories in 10.1.55 -->
+        <jackson-bom.version>2.21.7</jackson-bom.version>     <!-- parser DoS advisories; this service parses untrusted JSON -->
+        <postgresql.version>42.7.12</postgresql.version>      <!-- channel-binding downgrade -->
+        <log4j2.version>2.25.5</log4j2.version>               <!-- log4j-api, via spring-boot-starter-logging -->
+        <opentelemetry.version>1.62.0</opentelemetry.version> <!-- unbounded allocation parsing W3C baggage headers (producer-controlled) -->
     </properties>
 
     <dependencyManagement>
@@ -30,6 +41,12 @@
                 <version>${spring-ai.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <!-- Transitive via kafka-clients; native-library extraction race fixed in 1.11.4. Not managed by Boot. -->
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>1.11.4</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -168,6 +185,16 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!--
+                SBOM: declaring the plugin enables the configuration Spring Boot's parent POM manages for it (version,
+                output format and the generate-resources execution). It writes a CycloneDX bill of materials to
+                target/classes/META-INF/sbom/application.cdx.json, which ends up inside the jar. The parent only
+                manages this plugin; it does not run it unless the project declares it, as here.
+            -->
+            <plugin>
+                <groupId>org.cyclonedx</groupId>
+                <artifactId>cyclonedx-maven-plugin</artifactId>
             </plugin>
             <!-- Static analysis: SpotBugs plus the FindSecBugs security rules. -->
             <plugin>

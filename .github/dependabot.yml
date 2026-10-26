@@ -1,0 +1,23 @@
+# Keeps dependencies current. Security alerts also need "Dependabot alerts" enabled in the repository settings
+# (Settings > Code security); this file drives the routine version-update pull requests.
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      spring:
+        patterns: ["org.springframework*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # Spring Boot 4 and Spring AI 2 are major migrations done on purpose, not by an automatic pull request.
+      - dependency-name: "org.springframework.boot:*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.springframework.ai:*"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

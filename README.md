@@ -14,6 +14,7 @@ An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It list
 - [Project layout](#project-layout)
 - [Audit log and observability](#audit-log-and-observability)
 - [Static analysis and hardening](#static-analysis-and-hardening)
+- [Supply chain: SBOM and vulnerability scanning](#supply-chain-sbom-and-vulnerability-scanning)
 - [Running it](#running-it)
 - [Testing](#testing)
 - [Configuration](#configuration)
@@ -240,7 +241,7 @@ To view traces:
 docker compose --profile tracing up -d       # adds Jaeger (UI http://localhost:16686, OTLP on :4318)
 TRACING_EXPORT=true mvn spring-boot:run      # OTLP_TRACING_ENDPOINT overrides the collector URL
 ```
-Log lines also carry `[trace=...]` next to `[cid=...]`. Sampling is 100% because this is a low-volume control plane. Every `Observation` also feeds Micrometer timers (for example `dlq.triage` tagged by outcome and tier), but no metrics endpoint is exposed yet.
+Log lines also carry `[trace=...]` next to `[cid=...]`. Sampling is 100% because this is a low-volume control plane. Baggage propagation is switched off (`management.tracing.baggage.enabled=false`): it is unused, and the baggage header is producer-controlled input (see the OpenTelemetry advisory above). Every `Observation` also feeds Micrometer timers (for example `dlq.triage` tagged by outcome and tier), but no metrics endpoint is exposed yet.
 
 ## Static analysis and hardening
 `mvn verify` runs **SpotBugs with the FindSecBugs security rules** (effort Max, threshold Low) after the tests and **fails the build on any finding**. The only things allowed through are the entries in `spotbugs-exclude.xml`, each with its reason written next to it: the deliberate CSRF decision, informational endpoint listings, a constructor that stores injected collaborators, an intentional text-block newline, and a rethrow that must not be swallowed.
@@ -260,6 +261,38 @@ The first scan found 31 findings. Triage, honestly:
 | `SPRING_ENDPOINT`, `THROWS_METHOD_THROWS_RUNTIMEEXCEPTION`, `VA_FORMAT_STRING_USES_NEWLINE` | Informational or intentional | Excluded, with reasons |
 
 What this does **not** cover: dependency vulnerabilities (a software-composition scan such as OWASP Dependency-Check or Dependabot is on the roadmap), runtime or dynamic testing, secrets scanning, or the LLM-specific risks, which are handled by design (typed tools, the deterministic gate, the human tier) and by the prompt-injection tests rather than by a scanner.
+
+## Supply chain: SBOM and vulnerability scanning
+The app ships **120+ third-party libraries** (about 20 declared in the `pom.xml`, the rest transitive), and SpotBugs only analyzes our own code, so a separate scan covers the dependencies.
+
+**SBOM.** Every build writes a CycloneDX software bill of materials to `target/classes/META-INF/sbom/application.cdx.json`, which is packaged inside the jar. It comes from the `cyclonedx-maven-plugin` declared in the `pom.xml`, which inherits Spring Boot's managed configuration. (Boot's parent POM only *manages* this plugin; it does not run unless the project declares it.)
+
+**Scan.** `scripts/sca.sh` rebuilds from clean, then:
+1. **Syft** reads the built jar and writes a second CycloneDX SBOM (what is actually shipped);
+2. **Grype** scans both SBOMs against its vulnerability database and fails on **High or above**, minus the reviewed entries in `.grype.yaml`.
+
+Both tools run as pinned Docker images (Syft 1.55.0, Grype 0.121.0), so nothing is installed on the host. Requires Docker, Java 21 and Maven. The vulnerability database changes daily, so the result can change without any code change; that is why this is a separate gate (to be scheduled in CI) and **not** part of `mvn verify`, which stays deterministic.
+
+**Baseline and what was done.** The first scan found **27 known vulnerabilities (7 Critical, 8 High, 11 Medium, 1 Low)**. Triage, by what matters for this app:
+
+| Library | Advisory type | Relevance here | Action |
+|---|---|---|---|
+| Jackson 2.21.4 | parser denial of service (several High) | **Reachable**: this service parses untrusted DLQ payloads | Upgraded to 2.21.7 |
+| OpenTelemetry 1.49.0 | unbounded allocation parsing W3C baggage headers | **Reachable**: Kafka trace headers come from producers | Upgraded to 1.62.0 **and** baggage propagation turned off (unused) |
+| Tomcat 10.1.55 | DIGEST and FORM authenticator bypass (Critical) | Not reachable (Spring Security does the authentication), but a fix exists | Upgraded to 10.1.61 |
+| PostgreSQL JDBC 42.7.11, lz4-java 1.10.1, log4j-api 2.24.3 | channel-binding downgrade, temp-file race, minor | Low exposure, fixes exist | Upgraded to 42.7.12, 1.11.4, 2.25.5 |
+| Spring Framework 6.2.19 (webmvc, webflux) | 4 Critical: XsltView, SSE rendering, WebFlux functional endpoints | None of those features are used (checked by search) | **No fixed release exists** (6.2.19 is the newest 6.2.x). Ignored with a written reason |
+| MCP Java SDK 0.18.3 | DNS rebinding in the MCP server transport | No MCP server or client is used; arrives via `spring-ai-client-chat` | Fix is a major jump that Spring AI 1.1.8 was not built against. Ignored with a written reason |
+
+Result: **27 findings down to 5, all unfixable today and each documented in `.grype.yaml`** (revisit them on every Spring Boot or Spring AI upgrade). The upgrades are plain overrides in the `pom.xml` properties (`tomcat.version`, `jackson-bom.version`, `postgresql.version`, `log4j2.version`, `opentelemetry.version`, plus a managed `lz4-java`), each with a comment; remove one when Boot's own managed version catches up. The gate was checked in both directions: without the ignore list it exits 2, with it 0. The full test suite and SpotBugs pass on the upgraded versions.
+
+**Lessons from doing it:**
+- **Two SBOMs, because they disagree.** An earlier run showed a finding in one SBOM and not the other. The cause was a stale SBOM file left in `target/` by a previous build, which reported an old OpenTelemetry version even though the jar already contained the new one. The script therefore always rebuilds from clean. Scanning the built jar (Syft) is the ground truth; the Maven-generated SBOM is a cross-check.
+- **A "fixed in 10.1.58" advisory does not mean 10.1.58 exists.** That Tomcat version was never published to Maven Central, but 10.1.59 to 10.1.61 were, and they include the fix. Check the repository, not just the advisory.
+
+**Also in the repo:** `.github/dependabot.yml` (weekly Maven and Docker update pull requests; major Spring Boot and Spring AI upgrades are deliberately excluded). Dependabot *security alerts* must also be switched on in the GitHub repository settings (Settings, Code security).
+
+**Not covered:** license compliance, reachability analysis beyond the manual check above, signing or provenance of the build (for example SLSA attestations), publishing the SBOM as a release artifact, and scanning of a container image (there is none yet; the app runs as a plain jar).
 
 ## Architecture
 
@@ -305,6 +338,9 @@ dlq-healing-agent/
 ├── pom.xml                         Maven build; LLM provider profiles; Failsafe for *IT tests
 ├── docker-compose.yml              Local Kafka (KRaft) and PostgreSQL (+ optional Jaeger)
 ├── spotbugs-exclude.xml            reviewed SAST exclusions, each with its reason
+├── .grype.yaml                     reviewed SCA ignores (unfixable advisories), each with its reason
+├── scripts/sca.sh                  SBOM (Syft) + vulnerability scan (Grype) via pinned Docker images
+├── .github/dependabot.yml          weekly dependency update pull requests
 ├── src/main/java/com/example/dlqagent/
 │   ├── DlqAgentApplication.java
 │   ├── domain/
@@ -559,4 +595,4 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 7 | Strategy B: health-check tool, backoff scheduler and poller; circuit breaker against replay loops | Planned |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
-| 10 (idea) | **CI and supply chain.** GitHub Actions running `mvn verify` (which already includes SpotBugs/FindSecBugs; Testcontainers works on the standard Ubuntu runners) with a status badge; dependency vulnerability scanning (Dependabot, or OWASP Dependency-Check); a Maven wrapper (`mvnw`); a license if the repo is ever made public | Backlog |
+| 10 (idea) | **CI.** GitHub Actions running `mvn verify` (which already includes SpotBugs/FindSecBugs; Testcontainers works on the standard Ubuntu runners) with a status badge, plus a *scheduled* run of `scripts/sca.sh` (the vulnerability database changes daily); a Maven wrapper (`mvnw`); a license if the repo is ever made public. Done already: SBOM generation, Syft and Grype script, Dependabot config | Backlog |

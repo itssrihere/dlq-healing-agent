@@ -61,6 +61,8 @@ management:
   tracing:
     sampling:
       probability: 1.0            # this is a low-volume control plane; keep every trace
+    baggage:
+      enabled: false              # unused here, and the baggage header is producer-controlled input; off shrinks the attack surface
   otlp:
     tracing:
       endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
