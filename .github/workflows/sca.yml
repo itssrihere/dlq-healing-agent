@@ -1,0 +1,55 @@
+# Software-composition analysis: SBOM (Syft) and known-vulnerability scan (Grype), see scripts/sca.sh.
+#
+# It runs on every push and pull request, and also DAILY on a schedule. The schedule is the point: the
+# vulnerability database changes every day, so a dependency that was clean yesterday can be reported today
+# without any code change. A failed scheduled run is how that shows up (GitHub emails the person who last edited
+# the cron line; make sure Actions notifications are on under Settings > Notifications).
+name: SCA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * *"   # daily, 05:23 UTC (off the hour on purpose: top-of-hour runs are delayed under load)
+  workflow_dispatch:       # run it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sca-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sca:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # The vulnerability database is large; reuse the last one and let Grype update it incrementally.
+      - name: Restore the Grype database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/dlq-healing-agent/grype
+          key: grype-db-${{ github.run_id }}
+          restore-keys: grype-db-
+
+      - name: Build, write the SBOMs and scan them
+        run: ./scripts/sca.sh
+
+      - name: Keep the SBOMs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: target/sca/*.json
+          if-no-files-found: ignore
+          retention-days: 30

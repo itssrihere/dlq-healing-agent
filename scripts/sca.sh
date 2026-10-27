@@ -10,6 +10,8 @@
 # The vulnerability database changes daily, so this can turn red without any code change. That is why it is a
 # separate gate (scheduled in CI) and not part of `mvn verify`, which must stay deterministic.
 #
+# The containers run as the calling user, so files they write are not owned by root (matters on Linux and in CI).
+#
 # Usage: scripts/sca.sh
 set -euo pipefail
 
@@ -28,7 +30,7 @@ mvn -B -q clean package -DskipTests
 mkdir -p "$OUT" "$CACHE"
 
 echo "== SBOM from the built jar (Syft)"
-docker run --rm -v "$PWD/target:/in:ro" -v "$PWD/$OUT:/out" "$SYFT_IMAGE" \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/target:/in:ro" -v "$PWD/$OUT:/out" "$SYFT_IMAGE" \
   "/in/$(basename "$JAR")" -o cyclonedx-json=/out/syft.cdx.json -q
 cp target/classes/META-INF/sbom/application.cdx.json "$OUT/maven.cdx.json"
 echo "   $OUT/syft.cdx.json  and  $OUT/maven.cdx.json"
@@ -36,7 +38,7 @@ echo "   $OUT/syft.cdx.json  and  $OUT/maven.cdx.json"
 status=0
 for sbom in syft.cdx.json maven.cdx.json; do
   echo "== Vulnerability scan of $sbom (Grype, fails on High or above)"
-  docker run --rm -v "$PWD/$OUT:/in:ro" -v "$PWD/.grype.yaml:/config/.grype.yaml:ro" -v "$CACHE:/cache" \
+  docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/$OUT:/in:ro" -v "$PWD/.grype.yaml:/config/.grype.yaml:ro" -v "$CACHE:/cache" \
     -e GRYPE_DB_CACHE_DIR=/cache "$GRYPE_IMAGE" "sbom:/in/$sbom" -c /config/.grype.yaml -q || status=$?
 done
 

@@ -15,6 +15,7 @@ An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It list
 - [Audit log and observability](#audit-log-and-observability)
 - [Static analysis and hardening](#static-analysis-and-hardening)
 - [Supply chain: SBOM and vulnerability scanning](#supply-chain-sbom-and-vulnerability-scanning)
+- [Continuous integration](#continuous-integration)
 - [Running it](#running-it)
 - [Testing](#testing)
 - [Configuration](#configuration)
@@ -271,7 +272,7 @@ The app ships **120+ third-party libraries** (about 20 declared in the `pom.xml`
 1. **Syft** reads the built jar and writes a second CycloneDX SBOM (what is actually shipped);
 2. **Grype** scans both SBOMs against its vulnerability database and fails on **High or above**, minus the reviewed entries in `.grype.yaml`.
 
-Both tools run as pinned Docker images (Syft 1.55.0, Grype 0.121.0), so nothing is installed on the host. Requires Docker, Java 21 and Maven. The vulnerability database changes daily, so the result can change without any code change; that is why this is a separate gate (to be scheduled in CI) and **not** part of `mvn verify`, which stays deterministic.
+Both tools run as pinned Docker images (Syft 1.55.0, Grype 0.121.0), so nothing is installed on the host. Requires Docker, Java 21 and Maven. The vulnerability database changes daily, so the result can change without any code change; that is why this is a separate gate (scheduled daily in CI, see [Continuous integration](#continuous-integration)) and **not** part of `mvn verify`, which stays deterministic.
 
 **Baseline and what was done.** The first scan found **27 known vulnerabilities (7 Critical, 8 High, 11 Medium, 1 Low)**. Triage, by what matters for this app:
 
@@ -293,6 +294,27 @@ Result: **27 findings down to 5, all unfixable today and each documented in `.gr
 **Also in the repo:** `.github/dependabot.yml` (weekly Maven and Docker update pull requests; major Spring Boot and Spring AI upgrades are deliberately excluded). Dependabot *security alerts* must also be switched on in the GitHub repository settings (Settings, Code security).
 
 **Not covered:** license compliance, reachability analysis beyond the manual check above, signing or provenance of the build (for example SLSA attestations), publishing the SBOM as a release artifact, and scanning of a container image (there is none yet; the app runs as a plain jar).
+
+## Continuous integration
+Two GitHub Actions workflows in `.github/workflows/`:
+
+| Workflow | Runs on | What it does |
+|---|---|---|
+| `ci.yml` | every push to `main`, every pull request | `mvn -B verify` on Java 21: unit tests, Testcontainers integration tests (Docker is available on the runner), and the SpotBugs + FindSecBugs gate. Uploads the test reports if the build fails. The opt-in live-LLM evaluation is skipped because no API key is configured |
+| `sca.yml` | every push to `main`, every pull request, **daily at 05:23 UTC**, and on demand from the Actions tab | `scripts/sca.sh`: clean build, Syft SBOM of the jar, Grype scan of both SBOMs, fails on High or above. Uploads the SBOMs as a build artifact (30 days). The Grype database is cached between runs |
+
+Why a daily schedule: the vulnerability database changes every day, so a dependency that was clean yesterday can be flagged today with no code change. A failed scheduled run is how that surfaces; GitHub emails the person who last edited the cron line, so keep Actions notifications on (Settings, Notifications).
+
+Choices:
+- **Actions are pinned to exact commit SHAs** (with the version in a comment), not to moving tags, because the workflows run third-party code. Dependabot's `github-actions` ecosystem is not enabled yet, so bumping them is manual for now.
+- **Least privilege:** both workflows request only `contents: read`.
+- **Concurrency:** a newer run on the same ref cancels the older one.
+- **No secrets are used**, and the live-LLM evaluation deliberately never runs in CI (it costs money and depends on the model).
+
+Status and limits, stated plainly:
+- **The workflows have been linted with `actionlint` (clean; a deliberately broken control file was caught) and the script they call was run locally, but they have not yet run on GitHub.** The first push will be their real test, and Testcontainers-in-Actions may need a tweak.
+- A private repository on the free GitHub plan has a monthly Actions-minutes quota, and branch protection (making these checks mandatory before merging) is not available for private repositories on the free plan. The checks run and report, but nothing blocks a merge.
+- GitHub can switch off scheduled workflows after a long period without repository activity; if the daily scan goes quiet, check the Actions tab.
 
 ## Architecture
 
@@ -341,6 +363,8 @@ dlq-healing-agent/
 ├── .grype.yaml                     reviewed SCA ignores (unfixable advisories), each with its reason
 ├── scripts/sca.sh                  SBOM (Syft) + vulnerability scan (Grype) via pinned Docker images
 ├── .github/dependabot.yml          weekly dependency update pull requests
+├── .github/workflows/ci.yml        build, tests and SAST on push and pull request
+├── .github/workflows/sca.yml       SBOM and vulnerability scan on push, pull request and daily
 ├── src/main/java/com/example/dlqagent/
 │   ├── DlqAgentApplication.java
 │   ├── domain/
@@ -595,4 +619,4 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 7 | Strategy B: health-check tool, backoff scheduler and poller; circuit breaker against replay loops | Planned |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
-| 10 (idea) | **CI.** GitHub Actions running `mvn verify` (which already includes SpotBugs/FindSecBugs; Testcontainers works on the standard Ubuntu runners) with a status badge, plus a *scheduled* run of `scripts/sca.sh` (the vulnerability database changes daily); a Maven wrapper (`mvnw`); a license if the repo is ever made public. Done already: SBOM generation, Syft and Grype script, Dependabot config | Backlog |
+| 10 | **CI.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) written and linted; **first run on GitHub still pending**. Still to do: a status badge once the first run is green, a Maven wrapper (`mvnw`), Dependabot for the pinned actions, and a license if the repo is ever made public | In progress |
