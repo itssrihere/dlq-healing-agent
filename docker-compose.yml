@@ -38,7 +38,7 @@ services:
   # Optional trace viewer: `docker compose --profile tracing up -d`, run the app with TRACING_EXPORT=true,
   # then open http://localhost:16686
   jaeger:
-    image: jaegertracing/all-in-one:1.62.0
+    image: jaegertracing/all-in-one:1.76.0
     profiles: ["tracing"]
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
