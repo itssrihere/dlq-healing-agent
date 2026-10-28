@@ -289,6 +289,7 @@ Both tools run as pinned Docker images (Syft 1.55.0, Grype 0.121.0), so nothing 
 Result: **27 findings down to 5, all unfixable today and each documented in `.grype.yaml`** (plus the snappy-java advisories above, which appeared later and were fixed) (revisit them on every Spring Boot or Spring AI upgrade). The upgrades are plain overrides in the `pom.xml` properties (`tomcat.version`, `jackson-bom.version`, `postgresql.version`, `log4j2.version`, `opentelemetry.version`, plus a managed `lz4-java`), each with a comment; remove one when Boot's own managed version catches up. The gate was checked in both directions: without the ignore list it exits 2, with it 0. The full test suite and SpotBugs pass on the upgraded versions.
 
 **Lessons from doing it:**
+- **A version pinned in two places drifts, and only one place gets bumped.** Dependabot proposed Kafka 3.8.0 to 4.3.1 for `docker-compose.yml`, but the integration tests had their own hardcoded Kafka version, so a green build on that pull request would have proved nothing about Kafka 4. The tests now read the image versions from the compose file. Before adopting the bump, the full suite was run against a 4.3.1 broker and the whole stack was run for real (see [Real run findings](#real-run-findings)).
 - **A green build does not validate every dependency bump.** Dependabot's first pull request bumped lz4-java, which is used only when Kafka records are compressed, and no test compressed anything. `CompressionCodecsIT` closes that gap; the bump was then verified on a throwaway branch (full build, SpotBugs, and the vulnerability scan from an empty cache) before merging.
 - **The scheduled scan did its job within a day.** After the first scan was clean, three new snappy-java advisories were published and the next run reported them, with no code change. That is the whole case for scanning continuously instead of once.
 - **The pipeline's first failure was a bug in my script, and `-q` hid it.** Running the scanner containers as the calling user (so files are not root-owned) left Grype unable to write to its own `/tmp`, so it could not download its database on a fresh runner and exited 1. I had only tested that change with a database already cached on my machine. The script now gives the containers a writable `/tmp` and `HOME`, no longer passes `-q` (which suppressed the error text), and was verified from an empty cache under amd64, the conditions of a fresh CI runner. Exit code 1 means "the tool broke", exit code 2 means "vulnerabilities found"; the CI log should be read with that in mind.
@@ -354,7 +355,7 @@ The LLM only proposes. It never executes.
 - Java 21 (records, sealed types, virtual threads)
 - Spring Boot 3.5.16
 - Spring AI 1.1.8 (`ChatClient`, `@Tool`), OpenAI by default
-- Apache Kafka (via Spring Kafka), PostgreSQL 16, Flyway
+- Apache Kafka (Spring Kafka; client 3.9.2, verified against a 4.3.1 broker), PostgreSQL 16, Flyway
 - JUnit 5, Testcontainers (Kafka and PostgreSQL)
 - Maven
 
@@ -433,7 +434,7 @@ dlq-healing-agent/
     ├── ApprovalFlowIT.java           Tier 2 end to end: held, reviewed via the secured API, replayed or rejected
     ├── QuarantineFlowIT.java         DLQ → listener → planner (stub) → triage → Postgres, idempotency, NUL payload
     ├── support/ScriptedChatModel.java  deterministic fake LLM that records prompts
-    ├── support/TestProps.java, MainTopicReader.java, TracingTestConfig.java   test helpers (in-memory span exporter)
+    ├── support/TestProps.java, MainTopicReader.java, TracingTestConfig.java, ComposeImages.java   test helpers (in-memory span exporter; image versions read from docker-compose.yml)
     ├── support/StubLlmConfig.java      swaps in the fake ChatModel (not under profile live-llm)
     ├── agent/SpringAiRemediationPlannerTest.java
     ├── agent/LivePlannerEvalIT.java    opt-in, real model, skipped by default
@@ -497,9 +498,9 @@ Strategy B events are quarantined for now with a "not implemented yet" reason. T
 mvn verify        # unit tests (*Test) in `test`, Testcontainers tests (*IT) in `verify`
 ```
 
-Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch `docker-compose` and never call a real LLM (the API key is a dummy value).
+Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch the containers that `docker-compose` runs and never call a real LLM (the API key is a dummy value). The **image versions are read from `docker-compose.yml`** (`ComposeImages`), so there is one place to change a version, local development and the tests cannot drift apart, and a Dependabot bump of a compose image is exercised by the full test suite on its own pull request.
 
-Current coverage (118 unit and 38 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
+Current coverage (122 unit and 38 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
 - `InfrastructureSmokeIT`: Flyway creates both tables, both topics exist, configuration binds.
 - `QuarantineFlowIT`: a corrupt event published to `orders-dlq` (with correlation ID, original-topic and stack-trace headers) appears in `quarantine_event` with all metadata; saving the same record twice writes one row; a NUL-containing payload is sanitized and stored.
 - `SpringAiRemediationPlannerTest` (13 tests, scripted `ChatModel`): each strategy maps correctly; low, out-of-range and threshold-boundary confidence; unknown strategy, non-JSON and missing fields; model exceptions; JSON braces in the payload do not break the template; prompt contents, truncation and fencing; a prompt-injection payload stays inside the data fence.
@@ -545,6 +546,8 @@ Beyond the test suites, the actual application was run against real infrastructu
 **Resolved by changing the tier policy.** Originally the tier decision used the lower of the planner's and the repair's confidence. This run showed that was wrong: the planner's 0.80 (a statement about classification) kept a correct, gate-verified patch out of Tier 1. The policy now uses only the repair's confidence plus the risk flags. Re-run against the real stack afterwards: **5 of 5** text-amount events (`"11.99 USD"` to `"15.99 USD"`) went through **Tier 1** and were replayed to `orders-topic` with the correct numeric amounts and `x-repaired-by-agent: true`, each after 2 to 3 real tool calls. Caveat: in every one of those events the repair confidence was exactly `0.90`, which is the threshold. The model anchors on the number in the prompt, so this works by alignment, not by calibration. Risk flags, not confidence, remain the safety mechanism.
 
 The Jaeger check also confirmed the exporter wiring: the four audit rows' `trace_id` values matched the trace ids Jaeger showed.
+
+**Second real run, on newer infrastructure (2026-10-28):** Kafka **4.3.1** (a major version up from 3.8.0, with the unchanged 3.9.2 client) and Jaeger **1.76.0**, after Dependabot proposed both. Five events through the real model, after the tier policy change: all **3 text-amount events (`"21.50 USD"` to `"23.50 USD"`) went through Tier 1** and were replayed to `orders-topic` with the correct numeric amounts and `x-repaired-by-agent: true`; the corrupt event was quarantined with the model's rationale; the ambiguous date was declined by the model and quarantined. All five audit rows' `trace_id` values were found in Jaeger, with the complete span tree (`orders-dlq receive`, `dlq.triage`, `dlq.plan`, `dlq.repair`, the `tool_call` spans, `dlq.replay`, `orders-topic send`). The full test suite also passed against the 4.3.1 broker. Same caveat as before: repair confidence was again exactly 0.90.
 
 **What this does and does not show.**
 - It is a smoke-level check: one scenario per category, 6 in total. It shows that the prompts, structured-output parsing, tool wiring and gate work together with a real model. It is **not** an accuracy measurement, and it says nothing about messier real-world payloads or about other models.

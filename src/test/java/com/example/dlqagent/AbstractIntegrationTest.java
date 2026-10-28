@@ -1,5 +1,6 @@
 package com.example.dlqagent;
 
+import com.example.dlqagent.support.ComposeImages;
 import com.example.dlqagent.support.StubLlmConfig;
 import com.example.dlqagent.support.TracingTestConfig;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
@@ -16,7 +17,7 @@ import org.testcontainers.utility.DockerImageName;
 
 /**
  * Base class for end-to-end tests. Containers are static and shared across all subclasses,
- * so Kafka and Postgres start once per JVM. Connection settings are wired by @ServiceConnection.
+ * so Kafka and Postgres start once per JVM. Their image versions come from docker-compose.yml (see ComposeImages). Connection settings are wired by @ServiceConnection.
  */
 // MockMvc lives here, not on a subclass: a differently configured subclass would build a second Spring context,
 // and cached contexts stay alive, so two DLQ listeners in one consumer group would split the events between them.
@@ -28,10 +29,10 @@ import org.testcontainers.utility.DockerImageName;
 public abstract class AbstractIntegrationTest {
 
     @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>(ComposeImages.of("postgres"));
 
     @ServiceConnection
-    static final KafkaContainer KAFKA = new KafkaContainer(DockerImageName.parse("apache/kafka:3.8.0"));
+    static final KafkaContainer KAFKA = new KafkaContainer(DockerImageName.parse(ComposeImages.of("apache/kafka")));
 
     static {
         POSTGRES.start();
