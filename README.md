@@ -291,7 +291,7 @@ Result: **27 findings down to 5, all unfixable today and each documented in `.gr
 - **Two SBOMs, because they disagree.** An earlier run showed a finding in one SBOM and not the other. The cause was a stale SBOM file left in `target/` by a previous build, which reported an old OpenTelemetry version even though the jar already contained the new one. The script therefore always rebuilds from clean. Scanning the built jar (Syft) is the ground truth; the Maven-generated SBOM is a cross-check.
 - **A "fixed in 10.1.58" advisory does not mean 10.1.58 exists.** That Tomcat version was never published to Maven Central, but 10.1.59 to 10.1.61 were, and they include the fix. Check the repository, not just the advisory.
 
-**Also in the repo:** `.github/dependabot.yml` (weekly Maven and Docker update pull requests; major Spring Boot and Spring AI upgrades are deliberately excluded). Dependabot *security alerts* must also be switched on in the GitHub repository settings (Settings, Code security).
+**Also in the repo:** `.github/dependabot.yml` (weekly update pull requests for Maven dependencies, the container images in `docker-compose.yml`, and the GitHub Actions; major Spring Boot and Spring AI upgrades are deliberately excluded). The first version used the `docker` ecosystem, which only reads Dockerfiles; this repo has none, so Dependabot reported an error. `docker-compose` is the correct ecosystem for the compose file. Dependabot *security alerts* must also be switched on in the GitHub repository settings (Settings, Code security).
 
 **Not covered:** license compliance, reachability analysis beyond the manual check above, signing or provenance of the build (for example SLSA attestations), publishing the SBOM as a release artifact, and scanning of a container image (there is none yet; the app runs as a plain jar).
 
@@ -306,7 +306,8 @@ Two GitHub Actions workflows in `.github/workflows/`:
 Why a daily schedule: the vulnerability database changes every day, so a dependency that was clean yesterday can be flagged today with no code change. A failed scheduled run is how that surfaces; GitHub emails the person who last edited the cron line, so keep Actions notifications on (Settings, Notifications).
 
 Choices:
-- **Actions are pinned to exact commit SHAs** (with the version in a comment), not to moving tags, because the workflows run third-party code. Dependabot's `github-actions` ecosystem is not enabled yet, so bumping them is manual for now.
+- **Actions are pinned to exact commit SHAs** (with the version in a comment), not to moving tags, because the workflows run third-party code. Dependabot's `github-actions` ecosystem opens the update pull requests.
+- **The runner is pinned to `ubuntu-24.04`**, not `ubuntu-latest`: GitHub began moving that label to Ubuntu 26 on 2026-10-19, and this setup (Docker, Testcontainers, the scanner containers) has only been verified on 24.04. Moving to a newer image is a deliberate change, not a surprise.
 - **Least privilege:** both workflows request only `contents: read`.
 - **Concurrency:** a newer run on the same ref cancels the older one.
 - **No secrets are used**, and the live-LLM evaluation deliberately never runs in CI (it costs money and depends on the model).
@@ -619,4 +620,4 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 7 | Strategy B: health-check tool, backoff scheduler and poller; circuit breaker against replay loops | Planned |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
-| 10 | **CI.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) written and linted; **first run on GitHub still pending**. Still to do: a status badge once the first run is green, a Maven wrapper (`mvnw`), Dependabot for the pinned actions, and a license if the repo is ever made public | In progress |
+| 10 | **CI.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) written and linted; **first run on GitHub still pending**. Still to do: a status badge once the first run is green, a Maven wrapper (`mvnw`), and a license if the repo is ever made public | In progress |

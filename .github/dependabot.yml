@@ -17,7 +17,14 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "org.springframework.ai:*"
         update-types: ["version-update:semver-major"]
-  - package-ecosystem: "docker"
+  # The container images are referenced from docker-compose.yml (postgres, kafka, jaeger). The "docker" ecosystem
+  # only reads Dockerfiles, of which this repo has none, and fails with an error; "docker-compose" is the right one.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # The workflow actions are pinned to commit SHAs; this bumps the SHA and the version comment together.
+  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
