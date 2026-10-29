@@ -44,6 +44,15 @@ public abstract class AbstractIntegrationTest {
         // StubLlmConfig replaces the ChatModel, so no real call is made; the key only has to be non-empty for
         // auto-configuration. The opt-in live evaluation (DLQ_LIVE_LLM=true) uses the real key instead.
         registry.add("dlqagent.approval.password", () -> "test-reviewer-password");
+        // Strategy B on a test clock scale: seconds instead of minutes. The breaker's cooldown is long enough for a
+        // test to observe "no replay while open" and short enough not to slow the suite.
+        registry.add("dlqagent.retry.max-attempts", () -> "3");
+        registry.add("dlqagent.retry.initial-delay", () -> "200ms");
+        registry.add("dlqagent.retry.max-delay", () -> "1s");
+        registry.add("dlqagent.retry.poll-interval", () -> "200ms");
+        registry.add("dlqagent.retry.breaker.failure-threshold", () -> "4");
+        registry.add("dlqagent.retry.breaker.cooldown", () -> "3s");
+        registry.add("dlqagent.retry.breaker.canary-window", () -> "1s");
         registry.add("spring.ai.openai.api-key",
                 () -> "true".equals(System.getenv("DLQ_LIVE_LLM")) ? System.getenv("OPENAI_API_KEY") : "test-key");
     }

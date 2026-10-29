@@ -41,6 +41,6 @@ class InfrastructureSmokeIT extends AbstractIntegrationTest {
     void propertiesBindWithDefaults() {
         assertThat(props.topics().main()).isEqualTo("orders-topic");
         assertThat(props.topics().dlq()).isEqualTo("orders-dlq");
-        assertThat(props.retry().maxAttempts()).isEqualTo(5);
+        assertThat(props.retry().maxAttempts()).isEqualTo(3);
     }
 }

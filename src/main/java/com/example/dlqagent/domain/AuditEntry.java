@@ -35,11 +35,17 @@ public record AuditEntry(
         String actor,
         long durationMs) {
 
-    public enum Stage { TRIAGE, APPROVAL }
+    public enum Stage { TRIAGE, APPROVAL, RETRY }
 
     public enum Tier { NONE, TIER_1, TIER_2 }
 
-    public enum Outcome { REPLAYED, HELD_FOR_APPROVAL, QUARANTINED, APPROVED_REPLAYED, REJECTED }
+    public enum Outcome {
+        REPLAYED, HELD_FOR_APPROVAL, QUARANTINED, APPROVED_REPLAYED, REJECTED,
+        /** Strategy B: a replay was scheduled for later. */
+        RETRY_SCHEDULED,
+        /** Strategy B: a scheduled replay was sent, unchanged. */
+        RETRY_REPLAYED
+    }
 
     public AuditEntry {
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
@@ -50,5 +56,10 @@ public record AuditEntry(
     /** Deterministic per (event, stage), so reprocessing the same DLQ record cannot write a second row. */
     public static UUID idFor(UUID eventId, Stage stage) {
         return UUID.nameUUIDFromBytes((eventId + ":" + stage).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** One row per retry replay: deterministic per (retry, replay number), so a redone replay cannot write two. */
+    public static UUID idForRetry(UUID retryId, int replayNumber) {
+        return UUID.nameUUIDFromBytes((retryId + ":replay:" + replayNumber).getBytes(StandardCharsets.UTF_8));
     }
 }

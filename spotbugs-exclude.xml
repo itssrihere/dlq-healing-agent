@@ -40,4 +40,22 @@
         <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
     </Match>
 
+    <!-- False positive, same as DlqTriageService: the constructors store injected singleton collaborators
+         (repositories, transaction template, observation registry), not caller-owned mutable data. -->
+    <Match>
+        <Or>
+            <Class name="com.example.dlqagent.retry.RetryPoller"/>
+            <Class name="com.example.dlqagent.retry.RetryScheduler"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- The poller rethrows the RuntimeException after releasing the breaker's canary, so the transaction rolls back
+         and the row stays due. Swallowing it would mark an unsent event as replayed. -->
+    <Match>
+        <Class name="com.example.dlqagent.retry.RetryPoller"/>
+        <Method name="replayNextDue"/>
+        <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+    </Match>
+
 </FindBugsFilter>

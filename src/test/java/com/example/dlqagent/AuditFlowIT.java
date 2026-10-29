@@ -21,6 +21,7 @@ import com.example.dlqagent.domain.RemediationStrategy;
 import com.example.dlqagent.domain.RepairResult;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.retry.RetryScheduler;
 import com.example.dlqagent.support.MainTopicReader;
 import com.example.dlqagent.support.ScriptedChatModel;
 import io.micrometer.observation.ObservationRegistry;
@@ -60,6 +61,7 @@ class AuditFlowIT extends AbstractIntegrationTest {
     @Autowired TransactionTemplate tx;
     @Autowired DlqAgentProperties props;
     @Autowired TraceContext traceContext;
+    @Autowired RetryScheduler retryScheduler;
     @Autowired InMemorySpanExporter spans;
     @Autowired SdkTracerProvider tracerProvider;
 
@@ -259,7 +261,8 @@ class AuditFlowIT extends AbstractIntegrationTest {
         };
         var service = new DlqTriageService(
                 c -> new RemediationPlan.Quarantine("poison"), c -> new RepairResult.Unrepairable("unused"),
-                request -> { }, quarantine, failing, props, ObservationRegistry.NOOP, tx, traceContext);
+                request -> { }, quarantine, failing, props, ObservationRegistry.NOOP, tx, traceContext,
+                retryScheduler);
         var ctx = new FailureContext("cid-atomic-" + UUID.randomUUID(), "orders-dlq", 0, System.nanoTime() & 0xFFFFFFF,
                 "orders-topic", "k", "garbage", Map.of(), null, Instant.now());
 

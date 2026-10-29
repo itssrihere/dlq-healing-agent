@@ -47,6 +47,13 @@ dlqagent:
     initial-delay: 2s
     multiplier: 2.0
     max-delay: 5m
+    poll-interval: 5s            # how often due retries are looked for
+    batch-size: 10               # most replays per wake-up, which bounds the replay rate
+    breaker:
+      failure-threshold: 5       # retried events that came back to the DLQ ...
+      failure-window: 1m         # ... within this window open the breaker
+      cooldown: 30s              # no replays at all while open
+      canary-window: 2m          # after one canary replay: nothing came back this long = closed again
   planner:
     min-confidence: 0.7
     max-payload-chars: 4000      # prompt size bound; longer text is truncated

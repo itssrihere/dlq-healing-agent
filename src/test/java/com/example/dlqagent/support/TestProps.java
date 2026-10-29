@@ -12,7 +12,9 @@ public final class TestProps {
     public static DlqAgentProperties defaults() {
         return new DlqAgentProperties(
                 new DlqAgentProperties.Topics("orders-topic", "orders-dlq", 3),
-                new DlqAgentProperties.Retry(5, Duration.ofSeconds(2), 2.0, Duration.ofMinutes(5)),
+                new DlqAgentProperties.Retry(5, Duration.ofSeconds(2), 2.0, Duration.ofMinutes(5),
+                        Duration.ofSeconds(5), 10,
+                        new DlqAgentProperties.Breaker(5, Duration.ofMinutes(1), Duration.ofSeconds(30), Duration.ofMinutes(2))),
                 new DlqAgentProperties.Planner(0.7, 4000, 2000),
                 new DlqAgentProperties.Gate(0.9),
                 new DlqAgentProperties.Approval("reviewer", "unit-test-password"));

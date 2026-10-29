@@ -15,6 +15,12 @@ public final class DlqHeaders {
     /** The human who approved a Tier 2 repair; absent on Tier 1 automatic replays. */
     public static final String APPROVED_BY = "x-approved-by";
 
+    /**
+     * Added on a Strategy B replay: which replay this is. Informational for consumers and humans; the agent's own
+     * attempt count lives in the database, never in this header, because headers on a failed event are producer data.
+     */
+    public static final String RETRY_ATTEMPT = "x-retry-attempt";
+
     /** Short human-readable description of what the agent changed. */
     public static final String REPAIR_SUMMARY = "x-repair-summary";
 

@@ -36,6 +36,27 @@ public final class MainTopicReader {
         return found;
     }
 
+    /** Reads for the whole period and returns every record with the key: for asserting that nothing was sent twice. */
+    public static List<ConsumerRecord<String, String>> readAll(String bootstrapServers, String key, Duration period) {
+        var props = Map.<String, Object>of(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
+                ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID(),
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+                ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+                ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        List<ConsumerRecord<String, String>> found = new ArrayList<>();
+        try (var consumer = new KafkaConsumer<String, String>(props)) {
+            consumer.subscribe(List.of("orders-topic"));
+            long deadline = System.nanoTime() + period.toNanos();
+            while (System.nanoTime() < deadline) {
+                consumer.poll(Duration.ofMillis(300)).forEach(r -> {
+                    if (key.equals(r.key())) found.add(r);
+                });
+            }
+        }
+        return found;
+    }
+
     public static String header(ConsumerRecord<?, ?> r, String name) {
         var h = r.headers().lastHeader(name);
         return h == null ? null : new String(h.value(), java.nio.charset.StandardCharsets.UTF_8);

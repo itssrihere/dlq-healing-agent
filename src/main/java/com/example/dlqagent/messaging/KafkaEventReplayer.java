@@ -26,7 +26,8 @@ class KafkaEventReplayer implements EventReplayer {
     private static final Logger log = LoggerFactory.getLogger(KafkaEventReplayer.class);
     private static final long SEND_TIMEOUT_SECONDS = 10;
     private static final Set<String> AUDIT_HEADERS = Set.of(DlqHeaders.REPAIRED_BY_AGENT, DlqHeaders.REPAIR_SUMMARY,
-            DlqHeaders.CORRELATION_ID, DlqHeaders.APPROVED_BY);
+            DlqHeaders.CORRELATION_ID, DlqHeaders.APPROVED_BY,
+            DlqHeaders.RETRY_ATTEMPT);
 
     private final KafkaTemplate<String, String> kafka;
     private final ObservationRegistry observations;
@@ -54,15 +55,22 @@ class KafkaEventReplayer implements EventReplayer {
             }
         });
         record.headers().add(DlqHeaders.CORRELATION_ID, bytes(request.correlationId()));
-        record.headers().add(DlqHeaders.REPAIRED_BY_AGENT, bytes("true"));
-        record.headers().add(DlqHeaders.REPAIR_SUMMARY, bytes(request.summary() == null ? "" : request.summary()));
+        if (request.isRetry()) {
+            // Unchanged payload: it is not "repaired", and marking it so would make the loop guard treat a second
+            // transient failure as a failed repair. The retry budget in the database bounds the loop instead.
+            record.headers().add(DlqHeaders.RETRY_ATTEMPT, bytes(Integer.toString(request.retryAttempt())));
+        } else {
+            record.headers().add(DlqHeaders.REPAIRED_BY_AGENT, bytes("true"));
+            record.headers().add(DlqHeaders.REPAIR_SUMMARY, bytes(request.summary() == null ? "" : request.summary()));
+        }
         if (request.approvedBy() != null) {
             record.headers().add(DlqHeaders.APPROVED_BY, bytes(request.approvedBy()));
         }
 
         try {
             var result = kafka.send(record).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            log.info("Replayed repaired event topic={} partition={} offset={} approvedBy={}", LogSafe.clean(request.topic()),
+            log.info("Replayed event retry={} topic={} partition={} offset={} approvedBy={}", request.retryAttempt(),
+                    LogSafe.clean(request.topic()),
                     result.getRecordMetadata().partition(), result.getRecordMetadata().offset(), LogSafe.clean(request.approvedBy()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

@@ -12,11 +12,13 @@ import com.example.dlqagent.domain.RemediationPlan;
 import com.example.dlqagent.domain.RemediationPlanner;
 import com.example.dlqagent.domain.RemediationStrategy;
 import com.example.dlqagent.domain.RepairResult;
+import com.example.dlqagent.domain.RetryDecision;
 import com.example.dlqagent.domain.ReplayRequest;
 import com.example.dlqagent.domain.ToolCallRecord;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
 import com.example.dlqagent.observability.LogSafe;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.retry.RetryScheduler;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
@@ -54,12 +56,14 @@ public class DlqTriageService {
     private final ObservationRegistry observations;
     private final TransactionTemplate tx;
     private final TraceContext trace;
+    private final RetryScheduler retryScheduler;
     private final String mainTopic;
     private final double autoReplayMinConfidence;
 
     public DlqTriageService(RemediationPlanner planner, PayloadRepairer repairer, EventReplayer replayer,
                             QuarantineRepository quarantine, AuditLog audit, DlqAgentProperties props,
-                            ObservationRegistry observations, TransactionTemplate tx, TraceContext trace) {
+                            ObservationRegistry observations, TransactionTemplate tx, TraceContext trace,
+                            RetryScheduler retryScheduler) {
         this.planner = planner;
         this.repairer = repairer;
         this.replayer = replayer;
@@ -68,6 +72,7 @@ public class DlqTriageService {
         this.observations = observations;
         this.tx = tx;
         this.trace = trace;
+        this.retryScheduler = retryScheduler;
         this.mainTopic = props.topics().main();
         this.autoReplayMinConfidence = props.gate().autoReplayMinConfidence();
     }
@@ -121,13 +126,43 @@ public class DlqTriageService {
                 d.plannerConfidence = s.confidence();
                 repair(ctx, d);
             }
-            // Strategy B arrives in a later phase; until then it fails closed.
             case RemediationPlan.TransientRetry t -> {
                 d.plannerRationale = t.rationale();
                 d.plannerConfidence = t.confidence();
-                quarantine(ctx, d, RemediationStrategy.TRANSIENT, "Transient retry is not implemented yet: " + t.rationale());
+                retryLater(ctx, d, t);
             }
         }
+    }
+
+    /**
+     * Strategy B. The payload is never touched; only the timing is decided, by code: {@link RetryScheduler} applies
+     * the backoff and the attempt budget. The retry row, and the quarantine row if the budget is spent, are saved in
+     * the same transaction as the audit row.
+     */
+    private void retryLater(FailureContext ctx, Draft d, RemediationPlan.TransientRetry plan) {
+        if (!mainTopic.equals(ctx.originalTopic())) {
+            quarantine(ctx, d, RemediationStrategy.TRANSIENT,
+                    "Refusing to retry to unexpected topic '" + ctx.originalTopic() + "'");
+            return;
+        }
+        RetryDecision decision = tx.execute(status -> {
+            RetryDecision made = retryScheduler.recordFailure(ctx, plan.rationale());
+            switch (made) {
+                case RetryDecision.Scheduled s -> audit.record(entry(ctx, d, RemediationStrategy.TRANSIENT,
+                        AuditEntry.Tier.NONE, AuditEntry.Outcome.RETRY_SCHEDULED,
+                        "Replay %d of %d scheduled for %s%s".formatted(s.replayNumber(), s.maxReplays(), s.at(),
+                                s.duplicate() ? " (identical event already waiting)" : ""),
+                        List.of()));
+                case RetryDecision.Exhausted e -> {
+                    quarantine.save(QuarantineRecord.pending(ctx, RemediationStrategy.TRANSIENT, e.reason()));
+                    audit.record(entry(ctx, d, RemediationStrategy.TRANSIENT, AuditEntry.Tier.NONE,
+                            AuditEntry.Outcome.QUARANTINED, e.reason(), List.of()));
+                }
+                case RetryDecision.AlreadyHandled h -> { /* redelivery of a record that was already processed */ }
+            }
+            return made;
+        });
+        log.info("Strategy B: {}", LogSafe.clean(decision));
     }
 
     private void repair(FailureContext ctx, Draft d) {

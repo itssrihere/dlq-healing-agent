@@ -24,9 +24,11 @@ import com.example.dlqagent.domain.RemediationPlan;
 import com.example.dlqagent.domain.RemediationPlanner;
 import com.example.dlqagent.domain.RemediationStrategy;
 import com.example.dlqagent.domain.ReplayRequest;
+import com.example.dlqagent.domain.RetryDecision;
 import com.example.dlqagent.domain.RepairResult;
 import com.example.dlqagent.domain.ToolCallRecord;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.retry.RetryScheduler;
 import com.example.dlqagent.support.TestProps;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
@@ -44,9 +46,11 @@ class DlqTriageServiceTest {
     private final EventReplayer replayer = mock(EventReplayer.class);
     private final QuarantineRepository repo = mock(QuarantineRepository.class);
     private final AuditLog audit = mock(AuditLog.class);
+    private final RetryScheduler retryScheduler = mock(RetryScheduler.class);
     private final PlatformTransactionManager txManager = mock(PlatformTransactionManager.class);
     private final DlqTriageService service = new DlqTriageService(planner, repairer, replayer, repo, audit,
-            TestProps.defaults(), ObservationRegistry.NOOP, new TransactionTemplate(txManager), new TraceContext(null));
+            TestProps.defaults(), ObservationRegistry.NOOP, new TransactionTemplate(txManager), new TraceContext(null),
+            retryScheduler);
     // auto-replay needs >= 0.9
     private final FailureContext ctx = new FailureContext(
             "cid-1", "orders-dlq", 0, 7L, "orders-topic", "k", "{bad", Map.of("h", "v"), "trace", Instant.now());
@@ -234,16 +238,69 @@ class DlqTriageServiceTest {
         verifyNoInteractions(planner, repairer, replayer);
     }
 
+    // ---- Strategy B ---------------------------------------------------------------------------------------
+
     @Test
-    void transientStrategyStillFailsClosedUntilItIsImplemented() {
+    void transientFailureIsScheduledNotReplayedOrQuarantined() {
+        Instant at = Instant.parse("2026-01-01T00:00:02Z");
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
+        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.Scheduled(1, 5, at, false));
+
+        service.triage(ctx);
+
+        verify(replayer, never()).replay(any());
+        verifyNoInteractions(repo);
+        AuditEntry e = audited();
+        assertThat(e.strategy()).isEqualTo(RemediationStrategy.TRANSIENT);
+        assertThat(e.outcome()).isEqualTo(AuditEntry.Outcome.RETRY_SCHEDULED);
+        assertThat(e.plannerRationale()).isEqualTo("conn reset");
+        assertThat(e.outcomeReason()).contains("Replay 1 of 5").contains(at.toString());
+    }
+
+    @Test
+    void exhaustedRetriesAreQuarantinedWithTheReason() {
+        when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
+        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.Exhausted("Still failing after 5 replays"));
 
         service.triage(ctx);
 
         QuarantineRecord r = saved();
         assertThat(r.strategy()).isEqualTo(RemediationStrategy.TRANSIENT);
-        assertThat(r.reason()).contains("not implemented");
+        assertThat(r.status()).isEqualTo(QuarantineStatus.PENDING_REVIEW);
+        assertThat(r.reason()).isEqualTo("Still failing after 5 replays");
+        assertThat(audited().outcome()).isEqualTo(AuditEntry.Outcome.QUARANTINED);
         verify(replayer, never()).replay(any());
+    }
+
+    @Test
+    void redeliveryOfAnAlreadyHandledRecordWritesNothing() {
+        when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
+        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.AlreadyHandled());
+
+        service.triage(ctx);
+
+        verifyNoInteractions(repo, audit, replayer);
+    }
+
+    @Test
+    void transientRetryNeverTargetsATopicTheHeaderMadeUp() {
+        FailureContext spoofed = new FailureContext(
+                "cid-1", "orders-dlq", 0, 7L, "payments-topic", "k", "{}", Map.of(), "trace", Instant.now());
+        when(planner.plan(spoofed)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
+
+        service.triage(spoofed);
+
+        verifyNoInteractions(retryScheduler, replayer);
+        assertThat(saved().reason()).contains("unexpected topic");
+    }
+
+    @Test
+    void schedulerFailurePropagatesSoTheListenerRetries() {
+        when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
+        when(retryScheduler.recordFailure(ctx, "conn reset")).thenThrow(new IllegalStateException("db down"));
+
+        assertThatThrownBy(() -> service.triage(ctx)).isInstanceOf(IllegalStateException.class);
+        verifyNoInteractions(audit);
     }
 
     @Test

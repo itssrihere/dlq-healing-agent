@@ -2,12 +2,12 @@
 
 An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It listens to a DLQ, uses an LLM-driven *Remediation Planner* to decide what to do with each failed event, and then repairs and replays it, retries it later, or quarantines it for a human.
 
-> **Status: Phases 1–6 of the build are complete.** Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log and distributed tracing, and Strategy C (quarantine), work end to end, and have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). Strategy B (transient retry) is not built yet, so **B events are still quarantined** (fail-closed) until Phase 7. Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
+> **Status: Phases 1–7 of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) has been tested end to end against real Kafka and Postgres with a *scripted* model, and its planner classification was smoke-tested against the real model, but it has not yet been run in the full real-model stack.** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
 
 ## Contents
 - [AI-assisted development](#ai-assisted-development)
 - [What it does](#what-it-does)
-- [How it works](#how-it-works)
+- [How it works](#how-it-works) (including [Strategy B](#strategy-b-transient-retry))
 - [Architecture](#architecture)
 - [Safety model](#safety-model)
 - [Tech stack](#tech-stack)
@@ -35,12 +35,12 @@ This service triages them automatically. For every event on `orders-dlq` it pick
 | Strategy | Trigger | What the agent does | Outcome |
 |---|---|---|---|
 | **A: Schema / data drift** | Deserialization or constraint errors, format mismatches | Inspects the topic contract with typed tools, proposes a typed patch, passes it through the Evaluator Gate | **Tier 1:** a mechanical, high-confidence fix is replayed to `orders-topic` with `x-repaired-by-agent: true`. **Tier 2:** anything resting on an assumption waits for a human (`PENDING_HUMAN_APPROVAL`) |
-| **B: Transient infrastructure** | Connection resets, timeouts, downstream outage | Calls a health-check tool, schedules an exponential-backoff retry | Replays the unchanged event after the backoff |
+| **B: Transient infrastructure** | Connection resets, timeouts, downstream outage | Schedules an exponential-backoff retry in Postgres; a poller replays it. No health probe: the replay itself is the probe, and a circuit breaker watches whether replayed events come back | Replays the **unchanged** event after the backoff (`x-retry-attempt` header); quarantines it when the attempt budget is spent |
 | **C: Poison pill / unfixable** | Corrupt or malicious payload | Skips repair entirely | Writes to the PostgreSQL quarantine table for human audit |
 
 ## How it works
 
-Implemented today: everything in the diagram except Strategy B (🚧 Phase 7). Every outcome, including each human decision, also writes a row to the [audit log](#audit-log-and-observability).
+Implemented today: everything in the diagram. Every outcome, including each human decision, also writes a row to the [audit log](#audit-log-and-observability).
 
 ```
  orders-topic ──► main consumer ──(fails)──► orders-dlq
@@ -53,7 +53,7 @@ Implemented today: everything in the diagram except Strategy B (🚧 Phase 7). E
                          ┌──────────────────────┼───────────────────────┐
                          ▼                      ▼                       ▼
                  A: SchemaRepair         B: TransientRetry         C: Quarantine
-              (schema tools → patch)    (health check → backoff)          │
+              (schema tools → patch)    (backoff schedule)          │
                          │                      │                        │
              Evaluator Gate (hard / flags)  retry_schedule (Postgres)     │
               │            │         │              │ due                 │
@@ -72,8 +72,7 @@ Fallbacks, all of which end in quarantine:
 - The event is not a JSON object, so it is never sent to the repair model (**implemented**).
 - The `original-topic` header names a topic other than `orders-topic` (**implemented**).
 - The event already carries `x-repaired-by-agent` and failed again (**implemented**, loop guard).
-- A plan names Strategy B, which is not built yet (**implemented**, temporary).
-- 🚧 Strategy B exceeds its maximum retries.
+- Strategy B: the event fails again after `retry.max-attempts` replays (**implemented**), or its `original-topic` header names another topic (**implemented**).
 
 ### Event flow in detail (implemented part)
 1. `DlqListener` consumes `orders-dlq` with manual acknowledgement.
@@ -110,6 +109,31 @@ The `plan` method never throws; the triage service guards it as well.
 - The system prompt tells the model to treat it as data and to count instructions found in it as evidence for `POISON_PILL`.
 - Payload and stack-trace lengths are capped (`planner.max-payload-chars`, `planner.max-stack-trace-chars`), and the stored rationale is capped at 500 characters.
 - The model's output is only a classification. Even a successfully hijacked answer can at worst pick a different strategy, and strategy A is still gated by the deterministic Evaluator (🚧) before anything is replayed.
+
+### Strategy B: transient retry
+When the planner classifies a failure as transient (connection reset, timeout, downstream unavailable), the data is fine and the same event is expected to succeed later. Strategy B never edits it. The model's only contribution is the classification; **how often and how long to retry is decided by code**, not by the model.
+
+1. **Schedule.** `RetryScheduler` writes a `retry_schedule` row (event, key, headers, `attempt = 0`, `next_attempt_at = now + initial-delay`) in the same transaction as the audit row (`RETRY_SCHEDULED`).
+2. **Replay.** `RetryPoller` wakes every `retry.poll-interval`, claims the most overdue due row (`FOR UPDATE SKIP LOCKED`, so two instances cannot take the same one), asks the circuit breaker, replays the **original payload byte for byte** to `orders-topic` with `x-retry-attempt: n`, marks the row `REPLAYED` and writes a `RETRY_REPLAYED` audit row, all in one transaction. A crash before commit leaves the row due, so it is sent again: at-least-once, like every replay here. At most `retry.batch-size` replays per wake-up.
+3. **If it fails again,** the main service dead-letters it again. The agent recognises it as the same event, and either schedules replay n+1 after `initial-delay × multiplier^n` (capped at `max-delay`) or, once `max-attempts` replays have been spent, quarantines it (`strategy = TRANSIENT`, `QUARANTINED` audit row).
+4. **If it works,** nothing comes back and the row stays `REPLAYED`. The agent cannot see success, only the absence of another failure.
+
+**Retry identity is the content, not a header.** The attempt budget is keyed by a SHA-256 fingerprint of topic + key + payload. The payload is unchanged by a retry, so it is the same when the event fails again, even if the main service's dead-letter publisher drops or rewrites headers. A budget that depended on a header surviving would not bound the loop. `x-retry-attempt` is informational only. Consequences: two DLQ records with identical topic, key and payload share one budget (and one replay while one is pending), and a deliberate re-send of identical content after exhaustion stays exhausted.
+
+**Circuit breaker (`ReplayCircuitBreaker`, in memory).** It watches outcomes only and knows nothing about the downstream's internals:
+- *Closed:* replays flow. `failure-threshold` retried events coming back within `failure-window` opens it.
+- *Open:* no replays at all for `cooldown`; due rows simply wait.
+- *Half-open:* one canary replay. If a retried event comes back, open again for a full cooldown. If nothing comes back within `canary-window`, closed.
+
+"Nothing came back" is absence of evidence, not proof the downstream recovered, and `canary-window` must be longer than the main service's own retry time. The breaker state is deliberately **not** persisted: a restart resets it to closed, which costs at most one extra failing replay. What must survive a restart, the per-event attempt budget, is in the database.
+
+**Why there is no health-check tool.** The first design had a health probe against an allowlist of dependencies. It was dropped: a probe list is hand-maintained and goes stale when downstream services change, the stack trace is free text from another team's service and untrusted (probing a host named in it would be an SSRF), and a database ping is weak evidence about a real downstream. Observing whether replays come back needs no dependency knowledge. Optional active probes remain a [roadmap](#roadmap) item (row 11).
+
+Honest limits:
+- This is standard resilience engineering (backoff, an attempt budget, a breaker). The agentic part is only the classification of an arbitrary stack trace as transient or not.
+- The Strategy B tests use a scripted model. The real model's classification of a connection-reset stack trace is smoke-tested (`LivePlannerEvalIT`, 6/6), but the full Strategy B path has not been run with the real model, Kafka and Postgres together.
+- `retry_schedule` rows are kept forever; there is no retention job yet.
+- A repaired (Strategy A) event that later fails with a transient error is quarantined by the loop guard, not retried.
 
 ### Strategy A: schema repair and replay
 `SchemaRepairAgent` (the `PayloadRepairer` port) handles `SchemaRepair` plans. It is **generic**: everything topic-specific comes from a `TopicAdapter`.
@@ -400,6 +424,12 @@ dlq-healing-agent/
 │   │   ├── OrderContractValidator    the order Evaluator Gate rules; EvaluationResult
 │   │   ├── OrderSchemaTools          the two read-only @Tool methods
 │   │   └── OrderEvent / OrderStatus  the order contract
+│   ├── retry/                        Strategy B
+│   │   ├── RetryScheduler            deterministic: first / later / exhausted, by content fingerprint
+│   │   ├── RetryPoller               claims due rows (SKIP LOCKED), asks the breaker, replays unchanged
+│   │   ├── ReplayCircuitBreaker      in-memory closed / open / half-open, driven by replay outcomes
+│   │   ├── Backoff, RetryFingerprint exponential delay with overflow-safe cap; SHA-256 content identity
+│   │   └── RetryConfiguration        Clock, breaker bean, poller schedule
 │   ├── audit/AuditController         GET /api/audit?correlationId=
 │   ├── observability/                TraceContext (trace id for audit rows), LogSafe (log-injection guard)
 │   ├── approval/                     human review of Tier 2 proposals
@@ -418,6 +448,7 @@ dlq-healing-agent/
 │       ├── KafkaConsumerConfig       unbounded backoff error handler
 │       ├── SecurityConfig            Basic auth, deny-by-default, one reviewer account
 │       ├── JdbcQuarantineRepository  idempotent insert, review queries, row locking
+│       ├── JdbcRetryScheduleRepository  fingerprint upsert, locking claim of the next due row
 │       ├── JdbcAuditLog              idempotent append, query by correlation id
 │       ├── PgText                    NUL sanitizing shared by the JDBC adapters
 │       └── JdbcSchemaInspector       read-only catalog lookups, table allow-list
@@ -426,7 +457,7 @@ dlq-healing-agent/
 │   ├── prompts/planner-system.txt  planner system prompt
 │   ├── prompts/repair-system.txt   generic repair agent instructions
 │   ├── prompts/orders-contract.txt order contract, tools and rules shown to the repair model
-│   └── db/migration/               V1 quarantine_event, V2 retry_schedule, V3 orders, V4 tier-2 columns, V5 dlq_audit_log, V6 unbounded text columns
+│   └── db/migration/               V1 quarantine_event, V2 retry_schedule, V3 orders, V4 tier-2 columns, V5 dlq_audit_log, V6 unbounded text columns, V7 Strategy B retries
 └── src/test/java/com/example/dlqagent/
     ├── AbstractIntegrationTest.java  shared Testcontainers base class
     ├── InfrastructureSmokeIT.java    tables, topics, config binding
@@ -490,7 +521,7 @@ Try a Tier 2 case too: send the same event with `"amount":42.50` and `"createdAt
 docker compose exec postgres psql -U dlqagent -d dlqagent -c "select kafka_key, strategy, tier, outcome, planner_confidence, repair_confidence, jsonb_array_length(tool_calls) as tools, left(outcome_reason, 70) from dlq_audit_log order by occurred_at"
 ```
 
-Strategy B events are quarantined for now with a "not implemented yet" reason. The commands above were run for real (real model, Kafka, Postgres and Jaeger) in the [real run](#real-run-findings); the only differences were a different Postgres port, because 5432 was taken by another project. The console producer cannot set headers, so a correlation ID is generated and the original topic defaults to `orders-topic`.
+Strategy B events are scheduled and replayed by the poller (see [Strategy B](#strategy-b-transient-retry)). The commands above were run for real (real model, Kafka, Postgres and Jaeger) in the [real run](#real-run-findings); the only differences were a different Postgres port, because 5432 was taken by another project. The console producer cannot set headers, so a correlation ID is generated and the original topic defaults to `orders-topic`.
 
 ## Testing
 
@@ -500,7 +531,7 @@ mvn verify        # unit tests (*Test) in `test`, Testcontainers tests (*IT) in 
 
 Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch the containers that `docker-compose` runs and never call a real LLM (the API key is a dummy value). The **image versions are read from `docker-compose.yml`** (`ComposeImages`), so there is one place to change a version, local development and the tests cannot drift apart, and a Dependabot bump of a compose image is exercised by the full test suite on its own pull request.
 
-Current coverage (122 unit and 38 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
+Current coverage (152 unit and 42 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
 - `InfrastructureSmokeIT`: Flyway creates both tables, both topics exist, configuration binds.
 - `QuarantineFlowIT`: a corrupt event published to `orders-dlq` (with correlation ID, original-topic and stack-trace headers) appears in `quarantine_event` with all metadata; saving the same record twice writes one row; a NUL-containing payload is sanitized and stored.
 - `SpringAiRemediationPlannerTest` (13 tests, scripted `ChatModel`): each strategy maps correctly; low, out-of-range and threshold-boundary confidence; unknown strategy, non-JSON and missing fields; model exceptions; JSON braces in the payload do not break the template; prompt contents, truncation and fencing; a prompt-injection payload stays inside the data fence.
@@ -510,7 +541,7 @@ Current coverage (122 unit and 38 integration tests passing, SpotBugs clean; 6 l
 - `OrderTopicAdapterTest` and `TopicAdapterRegistryTest`: identity fields are never editable, the prompt's field lists match the enforced sets, lookup by topic, duplicate adapters fail fast.
 - `OrderSchemaToolsTest`: exactly two tools are exposed with the expected typed schemas; the generated tool callback works.
 - `JdbcSchemaInspectorIT`: reads the real catalog; refuses non-allow-listed tables, injection strings and `pg_catalog`.
-- `DlqTriageServiceTest` (19 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B fail-closed.
+- `DlqTriageServiceTest` (24 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B (scheduled, exhausted, redelivery, spoofed topic, scheduler failure propagates).
 - Hardening tests: `QuarantineFlowIT` sends a 300-character key, a 100-character correlation id and a 300-character original-topic header and requires a quarantine row (not a stalled partition); `ApprovalFlowIT` proves form, `text/plain` and body-less POSTs to approve and reject are refused with 415 or 400 and change nothing; `LogSafeTest`, `FailureContextFactoryTest` (which correlation ids are trusted), `OrderContractValidatorTest` (Unicode look-alikes) and an immutability test for the records.
 - `CompressionCodecsIT` (5 tests): sends a compressible record through the real broker with each Kafka codec (gzip, snappy, lz4, zstd) and reads it back, and checks from the build's SBOM that snappy-java and lz4-java have not dropped below their security minimums. It exists because those codec libraries are transitive dependencies that nothing else in the suite touches (the app does not compress its own records) yet they receive security upgrades and Dependabot bumps; without it a green build says nothing about whether such an upgrade still works. It also gave the snappy-java upgrade its first real runtime check.
 - `RecordingToolCallbackTest`: records name, success and duration, rethrows failures unchanged, never keeps arguments or results.
@@ -577,8 +608,11 @@ Application settings (`dlqagent.*`, validated at startup):
 |---|---|---|
 | `topics.main` / `topics.dlq` | `orders-topic` / `orders-dlq` | Topic names |
 | `topics.partitions` | `3` | Partitions for declared topics |
-| `retry.max-attempts` | `5` | Strategy B attempt limit |
+| `retry.max-attempts` | `5` | Strategy B: replays per event before it is quarantined |
 | `retry.initial-delay` / `multiplier` / `max-delay` | `2s` / `2.0` / `5m` | Backoff curve |
+| `retry.poll-interval` / `batch-size` | `5s` / `10` | How often due retries are looked for, and the most replays per wake-up (bounds the replay rate) |
+| `retry.breaker.failure-threshold` / `failure-window` | `5` / `1m` | Retried events coming back to the DLQ within the window open the breaker |
+| `retry.breaker.cooldown` / `canary-window` | `30s` / `2m` | No replays while open; after one canary, nothing back for this long closes it (must exceed the main service's own retry time) |
 | `planner.min-confidence` | `0.7` | Below this, the event is quarantined |
 | `planner.max-payload-chars` | `4000` | Payload (and headers) sent to the model are truncated beyond this |
 | `planner.max-stack-trace-chars` | `2000` | Stack trace sent to the model is truncated beyond this |
@@ -612,7 +646,7 @@ Managed by Flyway (`src/main/resources/db/migration`).
 
 **`orders`**: reference schema for the order domain, read by the schema tool (never written by this service). Its CHECK constraints mirror the order Evaluator Gate's rules and should be kept in sync.
 
-**`retry_schedule`** (table exists, not used until Phase 7): durable Strategy B retries. Stores the event, `attempt`, `next_attempt_at` and a `status` (`SCHEDULED`, `IN_FLIGHT`, `DONE`, `EXHAUSTED`). It is Postgres-backed rather than in-memory so scheduled retries survive restarts.
+**`retry_schedule`** (V2, used since V7): durable Strategy B retries. Stores the event, a unique content `fingerprint`, `attempt` (replays already sent), `next_attempt_at`, `last_event_id` (the DLQ record that last scheduled it, so a redelivered record is not counted as a new failure) and a `status`: `SCHEDULED`, `REPLAYED` (sent; nothing has come back yet) or `EXHAUSTED`. There is no in-flight state: a row is claimed and replayed in one transaction. Postgres-backed rather than in-memory so the attempt budget survives restarts.
 
 ## Roadmap
 
@@ -625,7 +659,9 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 4b | Topic-adapter refactor: generic engine, `OrderTopicAdapter`, strict-JSON helper. Behavior-preserving; all existing tests kept | ✅ Done |
 | 5 | Two-tier gate: hard violations vs risk flags; Tier 1 auto-replay, Tier 2 `PENDING_HUMAN_APPROVAL` persisted; approve/reject API (Spring Security) | ✅ Done |
 | 6 | `dlq_audit_log` (diffs, rationale, tool-call summaries, tier decision, outcome; append-only), `/api/audit`, Micrometer tracing with OTLP export | ✅ Done |
-| 7 | Strategy B: health-check tool, backoff scheduler and poller; circuit breaker against replay loops | Planned |
+| 7 | Strategy B: durable backoff schedule and poller, unchanged replay, content-fingerprint attempt budget, outcome-based circuit breaker. Tested end to end with a scripted model; **not yet run with the real model**. A health-check tool was designed out (see [Strategy B](#strategy-b-transient-retry)) | ✅ Done |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
+| 11 (idea) | **Optional active probes for Strategy B.** Today the breaker only watches whether replayed events come back. An active probe could stop retries earlier. It would be *discovered, not listed*: read from a service registry or catalog (for example an actuator health URL each owning team publishes), so it stays current as services change. The model may propose which dependency looks involved from the stack trace; deterministic code accepts it only if it exists in the registry (the same propose-then-validate pattern as Strategy A), and an unmapped dependency fails closed with an audit entry and a metric so the gap is visible. The probe target must never come from the stack trace itself (SSRF). Needs a real registry to build and test honestly | Backlog |
+| 12 (idea) | **DAST.** An OWASP ZAP baseline and authenticated active scan against the running service (about five HTTP endpoints; the Kafka consumer is out of reach) in a scheduled, non-blocking workflow with a reviewed ignore list. Marginal over the MockMvc security tests, so low priority | Backlog |
 | 10 | **CI.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) written and linted; **first run on GitHub still pending**. Still to do: a status badge once the first run is green, a Maven wrapper (`mvnw`), and a license if the repo is ever made public | In progress |
