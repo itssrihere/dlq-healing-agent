@@ -5,7 +5,9 @@ import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import java.util.List;
 import java.time.Duration;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -18,7 +20,8 @@ public record DlqAgentProperties(
         @Valid @NotNull Retry retry,
         @Valid @NotNull Planner planner,
         @Valid @NotNull Gate gate,
-        @Valid @NotNull Approval approval) {
+        @Valid @NotNull Approval approval,
+        @Valid @NotNull Contract contract) {
 
     public record Topics(
             @NotBlank String main,
@@ -84,6 +87,23 @@ public record DlqAgentProperties(
     /** Tier-1 / Tier-2 policy. Confidence can only demote a repair to Tier 2, never promote one. */
     public record Gate(
             @DecimalMin("0.0") @DecimalMax("1.0") double autoReplayMinConfidence) {}
+
+    /**
+     * The main topic's contract. {@code schema} is the JSON Schema (the single source of truth for shape). The rest is
+     * the small policy a schema cannot express and a model must never set for itself: which fields are identity (never
+     * edited), which field must equal the Kafka key, and which timestamps may not be in the future.
+     */
+    public record Contract(
+            @NotBlank String schema,
+            @NotEmpty List<String> identityFields,
+            String keyField,
+            List<String> noFutureFields) {
+
+        public Contract {
+            identityFields = identityFields == null ? List.of() : List.copyOf(identityFields);
+            noFutureFields = noFutureFields == null ? List.of() : List.copyOf(noFutureFields);
+        }
+    }
 
     /** The single reviewer account for the approval API. The password has no default on purpose. */
     public record Approval(

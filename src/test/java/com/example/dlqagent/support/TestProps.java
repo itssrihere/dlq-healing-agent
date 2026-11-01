@@ -17,12 +17,15 @@ public final class TestProps {
                         new DlqAgentProperties.Breaker(5, Duration.ofMinutes(1), Duration.ofSeconds(30), Duration.ofMinutes(2))),
                 new DlqAgentProperties.Planner(0.7, 4000, 2000),
                 new DlqAgentProperties.Gate(0.9),
-                new DlqAgentProperties.Approval("reviewer", "unit-test-password"));
+                new DlqAgentProperties.Approval("reviewer", "unit-test-password"),
+                new DlqAgentProperties.Contract("classpath:contracts/orders.schema.json",
+                        java.util.List.of("orderId", "customerId"), "orderId", java.util.List.of("createdAt")));
     }
 
     public static DlqAgentProperties withPlanner(int maxPayloadChars, int maxStackTraceChars) {
         DlqAgentProperties d = defaults();
         return new DlqAgentProperties(d.topics(), d.retry(),
-                new DlqAgentProperties.Planner(0.7, maxPayloadChars, maxStackTraceChars), d.gate(), d.approval());
+                new DlqAgentProperties.Planner(0.7, maxPayloadChars, maxStackTraceChars), d.gate(), d.approval(),
+                d.contract());
     }
 }

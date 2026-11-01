@@ -58,6 +58,11 @@ dlqagent:
     min-confidence: 0.7
     max-payload-chars: 4000      # prompt size bound; longer text is truncated
     max-stack-trace-chars: 2000
+  contract:
+    schema: classpath:contracts/orders.schema.json   # the single source of truth for the shape of an event
+    identity-fields: [orderId, customerId]           # never edited by the agent, must be unchanged in a repair
+    key-field: orderId                               # must equal the Kafka key
+    no-future-fields: [createdAt]                    # a timestamp the schema cannot bound
   gate:
     auto-replay-min-confidence: 0.9   # below this, even a risk-free repair waits for a human (Tier 2)
   approval:

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Order event",
+  "description": "An order event on orders-topic. Mirrors the orders table: keep the two in step (a test checks that they agree).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["orderId", "customerId", "amount", "currency", "status", "createdAt"],
+  "properties": {
+    "orderId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "description": "Letters, digits, underscore or hyphen. Equals the Kafka key."
+    },
+    "customerId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "description": "Same format as orderId."
+    },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1e10,
+      "multipleOf": 0.01,
+      "description": "A JSON number, never text. Greater than 0, at most 2 decimal places."
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$",
+      "description": "Three uppercase letters, an ISO-4217 code such as USD."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["NEW", "PAID", "SHIPPED", "CANCELLED"]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp with a UTC offset, such as 2025-04-03T10:00:00Z."
+    }
+  }
+}
