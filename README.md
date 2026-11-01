@@ -2,7 +2,7 @@
 
 An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It listens to a DLQ, uses an LLM-driven *Remediation Planner* to decide what to do with each failed event, and then repairs and replays it, retries it later, or quarantines it for a human.
 
-> **Status: Phases 1–7 of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
+> **Status: Phases 1–7 and 7b (schema-driven contracts) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
 
 ## Contents
 - [AI-assisted development](#ai-assisted-development)
@@ -138,36 +138,47 @@ Honest limits:
 ### Strategy A: schema repair and replay
 `SchemaRepairAgent` (the `PayloadRepairer` port) handles `SchemaRepair` plans. It is **generic**: everything topic-specific comes from a `TopicAdapter`.
 
-**Topic adapters.** A `TopicAdapter` is the boundary between the generic engine and one topic's domain. It supplies:
-- `contract()`: the prompt text describing the target contract and its tools;
-- `tools()`: the read-only `@Tool` objects the model may call for this topic;
-- `editableFields()` and `immutableFields()`: the only fields a patch may touch, and the identity fields it never may;
-- `validate(json)`: a standalone contract check, which is also what the model's validation tool runs;
-- `evaluate(original, candidate, key)`: the authoritative deterministic check a repair must pass before replay.
+**One contract, derived rules (Phase 7b).** A topic's contract is one JSON Schema document (`contracts/orders.schema.json`) plus a small policy in configuration (`dlqagent.contract`): which fields are identity, which field must equal the Kafka key, which timestamps may not be in the future. `SchemaDrivenTopicAdapter` derives everything else from them:
+- the model's prompt: the schema itself, plus generated lists of the editable and identity fields;
+- the **editable fields**: every plain string or number property that is not an identity field (nested objects, arrays and booleans are never editable). There is no hand-kept allowlist: add a property to the schema and it becomes editable;
+- the validation tool and the **shape check** of the gate, run by a JSON Schema validator (`networknt json-schema-validator`). Properties declared `format: date` or `date-time` are checked with the Java parser a Java consumer uses, and a regex-level newline trick is closed by rejecting control characters in any string;
+- the gate's **meaning-preservation rules**, which are generic (table below) and read the schema's field types.
 
-`TopicAdapterRegistry` resolves the adapter from the event's `original-topic`. A topic with no adapter cannot be repaired and the model is never called. Two adapters for one topic fail startup. The reference implementation is `OrderTopicAdapter` (package `orders`): an `OrderEvent` (`orderId`, `customerId`, `amount`, `currency`, `status`, `createdAt`) backed by the `orders` table. The model's own use of a validation tool is advisory; the engine always re-runs `adapter.evaluate` itself, so a model that skips or misreads the tool cannot bypass it.
+What stays hand-written, on purpose, is the small policy (identity fields, key field, no-future timestamps). A schema cannot say which fields are identity, and a model must not be able to widen its own limits. A startup check refuses a policy that names a field the schema does not have.
+
+**The `TopicAdapter` port** is still the boundary between the generic engine and a topic. It supplies `contract()` (the prompt text), `tools()`, `editableFields()` and `immutableFields()`, `validate(json)` (also what the model's validation tool runs) and `evaluate(original, candidate, key)` (the authoritative check a repair must pass before replay). `TopicAdapterRegistry` resolves the adapter from the event's `original-topic`; a topic with no adapter cannot be repaired and the model is never called; two adapters for one topic fail startup. The model's own use of the validation tool is advisory: the engine always re-runs `adapter.evaluate` itself, so a model that skips or misreads the tool cannot bypass it.
+
+**Where the schema comes from** is a port (`ContractSource`) with one implementation today: a Spring resource location such as `classpath:contracts/orders.schema.json`. A schema registry would be another implementation. **That is not built, and nothing here claims registry support.**
+
+**Keeping the schema and the database in step.** The `orders` table is the reference consumer's storage. `OrdersContractDriftIT` runs the configured contract against the real table: whatever the gate accepts, the table must accept (otherwise a "repaired" event would fail downstream again), and the `status` and `currency` rules must match the table's CHECK constraints exactly. The gate may be stricter than the table (identifier characters, two decimal places, no future dates), which only costs an extra human review. It replaces the old comment "keep these in sync".
+
+**A new topic needs no new Java for the contract and the gate.** `SecondContractRepairTest` runs a test-only `shipments` contract (an integer, an enum and a plain date) through the real repair agent, patch applier and gate with no shipment-specific code. Replaying to a second topic is a separate limit: the replay guard still allows only `topics.main`.
 
 1. **Parse.** The payload must be a JSON object (strict: no duplicate keys, no trailing text). Otherwise the model is never called.
-2. **Ask the repair model**, with the adapter's contract in the system prompt and the adapter's tools attached. For orders these are two read-only tools (`OrderSchemaTools`):
+2. **Ask the repair model**, with the adapter's contract in the system prompt and two read-only tools attached (`ContractTools`):
    - `describeTable(tableName)`: column types, lengths and constraints from the Postgres catalog. Only the allow-listed table `orders` is accepted.
-   - `validateOrderPayload(json)`: runs the gate's schema and business rules and returns the violations, so the model can test its own idea.
-3. **The model returns a `PatchProposal`, not a payload**: `repairable`, `confidence`, `summary`, `edits` (field plus new value) and `dropFields`. `field` is a JSON field name and must be on the adapter's editable list (for orders: `amount`, `currency`, `status`, `createdAt`). `PatchApplier` rejects an edit to anything else, including the identity fields `orderId` and `customerId`, and refuses to drop identity fields. (Before Phase 4b this was an enum, which also constrained the model's output schema. It is now a string validated in Java, which keeps the engine topic-agnostic. The editable list is generated into the prompt from the same set the applier enforces.)
-4. **Java applies the patch** (`PatchApplier`) to a copy: at most 8 edits, no duplicate edits, values capped at 64 characters, and values converted by the adapter's declared field type (a `DECIMAL` field must parse as a plain decimal).
-5. **The Evaluator Gate decides** (`adapter.evaluate`; for orders, `OrderContractValidator`, plain Java, no model). It returns two separate lists: **hard violations** (the patch must never be replayed, even by a human) and **risk flags** (valid, but resting on an assumption a human should confirm):
+   - `validatePayload(json)`: runs the contract's shape rules and returns the violations, so the model can test its own idea.
+
+   Tool use is optional for the model. With the full JSON Schema in the prompt, the real model made **no tool calls** in any of its runs after Phase 7b (before it, 2 to 3 per repair). The tools are attached to every request (a unit test checks the request options, and a one-off live probe confirmed the real model calls `validatePayload` when asked to), so this is the model's choice, not a wiring fault. The gate is the authority either way.
+3. **The model returns a `PatchProposal`, not a payload**: `repairable`, `confidence`, `summary`, `edits` (field plus new value) and `dropFields`. `field` is a JSON field name and must be on the adapter's editable list (derived from the schema; for orders: `amount`, `currency`, `status`, `createdAt`). `PatchApplier` rejects an edit to anything else, including the identity fields `orderId` and `customerId`, and refuses to drop identity fields. (The edit field is a string validated in Java, which keeps the engine topic-agnostic. The editable list is generated into the prompt from the same set the applier enforces.)
+4. **Java applies the patch** (`PatchApplier`) to a copy: at most 8 edits, no duplicate edits, values capped at 64 characters, and values converted by the field type derived from the schema (a `number` or `integer` property is a `DECIMAL` edit and must parse as a plain decimal).
+5. **The Evaluator Gate decides** (`adapter.evaluate`, plain Java, no model). It returns two separate lists: **hard violations** (the patch must never be replayed, even by a human) and **risk flags** (valid, but resting on an assumption a human should confirm). The rules are generic: a repair may change *how a value is written*, never *what it means*.
 
    | Rule | Checks | Result |
    |---|---|---|
-   | Schema | Required fields and types; id format; `amount` is a JSON number, > 0, ≤ 2 decimals, < 10¹⁰; `currency` is a real ISO-4217 code; `status` is a known value; `createdAt` is ISO-8601 with offset and not in the future; no unknown fields | hard |
-   | Identity | `orderId` and `customerId` must exist in the original and be unchanged; `orderId` must equal the Kafka key | hard |
-   | Amount value | The numeric value of `amount` must not change (`"19.99 USD"` → `19.99` is fine, `29.99` is rejected) | hard |
-   | Unverifiable amount | Original amount text with no number, two numbers, or thousands separators, so the value cannot be compared | flag |
+   | Shape | The JSON Schema (required fields, types, patterns, enums, ranges, no unknown fields); date and date-time properties parse; no control characters in strings; no-future timestamps are not in the future | hard |
+   | Identity | Each identity field must exist in the original and be unchanged; the key field must equal the Kafka key | hard |
+   | Number value | The value of a `number` or `integer` property must not change (`"19.99 USD"` → `19.99` is fine, `29.99` is rejected) | hard |
+   | Unverifiable number | Original text with no number, two numbers, or thousands separators, so the value cannot be compared | flag |
    | Filled-in field | A field absent in the original was populated by the agent (for example a missing `currency`) | flag |
    | Rename | Old field dropped, new field set; the mapping cannot be verified | flag |
-   | Mapping | `status` or `currency` changed to something other than a case or whitespace variant (`dispatched` → `SHIPPED`, `$` → `USD`) | flag |
+   | Mapping | A string property changed to something other than a case or whitespace variant (`dispatched` → `SHIPPED`, `$` → `USD`) | flag |
    | Ambiguous date | `03/04/2025` style dates where day and month could be swapped | flag |
-   | Reformatted date | A non-ISO `createdAt` was converted, which assumes a time of day and zone | flag |
+   | Reformatted date | A non-ISO date was converted (for a date-time this also assumes a time of day and zone) | flag |
 
-   Not flagged (mechanical, so eligible for Tier 1): text amount to the same number, case normalization of `status` and `currency`, and dropping an unknown extra field.
+   Not flagged (mechanical, so eligible for Tier 1): text number to the same number, case normalization of a string, and dropping an unknown extra field.
+
+   **Deliberate differences from the hand-written validator this replaced** (found by a differential run over about 58,000 repair evaluations, where the two otherwise agreed on every verdict and flag): the old validator also required `currency` to be a real ISO-4217 code, which a schema cannot express. The contract now follows the table's own CHECK (three uppercase letters), and a changed currency is still flagged as a mapping. Timestamps are parsed the way Java parses them, so lowercase `t`/`z` and the `-00:00` offset are accepted. The recorded verdicts live on as `OrdersGateCorpusTest`, a digest over the same corpus.
 6. **Route by tier** (`DlqTriageService`, deterministic, see [The two-tier gate](#the-two-tier-gate)).
 7. **Replay.** A Tier 1 candidate (or an approved Tier 2 proposal) is published to the original topic by `KafkaEventReplayer` with the original key and headers plus `x-repaired-by-agent: true`, `x-correlation-id` and `x-repair-summary`, and `x-approved-by` when a human approved it. The send must be acknowledged by the broker. Any copy of these audit headers on the failed event is stripped first, so they cannot be spoofed forward.
 
@@ -354,7 +365,7 @@ Four layers, with dependencies pointing inward:
 |---|---|---|
 | Domain | `domain` | Records and ports (`RemediationPlanner`, `PayloadRepairer`, `EventReplayer`, `TopicAdapter`, `SchemaInspector`, `QuarantineRepository`). No Spring, Kafka or LLM dependencies. |
 | Agent | `agent` | Generic engine: triage orchestration, planner, repair agent, adapter registry, patch applier. Knows nothing about any specific topic. |
-| Topic adapters | `orders` | `OrderTopicAdapter`, its `@Tool` class, the Evaluator Gate rules and the `OrderEvent` contract. A new topic is a new adapter package. |
+| Contract | `contract` | `SchemaContract` (JSON Schema + policy), `ChangeRules` (generic meaning-preservation rules), `SchemaDrivenTopicAdapter`, `ContractTools`. Nothing in it knows about orders. A new topic is a schema file plus configuration. |
 | JSON | `json` | `StrictJson`: the one strict parsing dialect for untrusted payloads. |
 | Messaging | `messaging` | DLQ listener, header and correlation-ID handling, replay publisher. |
 | Infrastructure | `infrastructure` | Kafka and Postgres config, typed properties, JDBC adapters (quarantine, schema inspector). |
@@ -367,8 +378,8 @@ The LLM only proposes. It never executes.
 
 1. **Typed tools only.** The model can call only whitelisted, parameterized `@Tool` methods. Each strategy gets its own tool set, so it cannot reach tools outside its path. There is no raw SQL and no raw Kafka access.
 2. **Typed output.** The plan must parse into a `RemediationPlan` record. Anything else is quarantined.
-3. **Deterministic gate.** The Evaluator Gate (for orders: schema, business rules, identity fields, amount preservation, plus risk flags for assumptions) is plain Java outside the LLM, supplied by the topic adapter. Nothing is replayed without passing its hard checks.
-4. **Structurally limited edits.** The model returns edits to four whitelisted fields, never a payload. Identity fields are not representable in an edit.
+3. **Deterministic gate.** The Evaluator Gate (the contract's schema, identity fields, key, number preservation, plus risk flags for assumptions) is plain Java outside the LLM, derived from the topic's schema and policy. Nothing is replayed without passing its hard checks.
+4. **Structurally limited edits.** The model returns edits to schema-derived scalar fields, never a payload. Identity fields (declared in the policy, which the model cannot change) are not representable in an edit.
 5. **Closed loops and targets.** Replays go only to the configured main topic, and an agent-repaired event that fails again is quarantined, never re-repaired.
 6. **Human in the loop for assumptions.** A repair with any risk flag, or with confidence below the threshold, is never auto-replayed. Confidence can only demote, never promote.
 7. **Authenticated approvals.** Approving publishes to a production topic, so the approval API requires credentials, re-validates the proposal, locks the row, and records the reviewer.
@@ -419,11 +430,13 @@ dlq-healing-agent/
 │   │   ├── PatchApplier              deterministic, bounded patch application
 │   │   ├── RecordingToolCallback     wraps each tool to record name, success and duration (no arguments)
 │   │   └── FailurePrompt             fenced, truncated prompt rendering
-│   ├── orders/                       the reference topic adapter
-│   │   ├── OrderTopicAdapter         implements TopicAdapter for orders-topic
-│   │   ├── OrderContractValidator    the order Evaluator Gate rules; EvaluationResult
-│   │   ├── OrderSchemaTools          the two read-only @Tool methods
-│   │   └── OrderEvent / OrderStatus  the order contract
+│   ├── contract/                     schema-driven Strategy A (Phase 7b)
+│   │   ├── SchemaContract            JSON Schema + policy; shape check, editable fields, startup checks
+│   │   ├── ContractPolicy            identity fields, key field, no-future timestamps
+│   │   ├── ChangeRules               generic: a repair changes the representation of a value, never its meaning
+│   │   ├── SchemaDrivenTopicAdapter  implements TopicAdapter from a SchemaContract (prompt, editable fields, gate)
+│   │   ├── ContractTools             the two read-only @Tool methods, for any topic
+│   │   └── ContractConfiguration     builds the main topic's adapter from dlqagent.contract
 │   ├── retry/                        Strategy B
 │   │   ├── RetryScheduler            deterministic: first / later / exhausted, by content fingerprint
 │   │   ├── RetryPoller               claims due rows (SKIP LOCKED), asks the breaker, replays unchanged
@@ -451,12 +464,13 @@ dlq-healing-agent/
 │       ├── JdbcRetryScheduleRepository  fingerprint upsert, locking claim of the next due row
 │       ├── JdbcAuditLog              idempotent append, query by correlation id
 │       ├── PgText                    NUL sanitizing shared by the JDBC adapters
+│       ├── ResourceContractSource    reads a contract from a Spring resource location
 │       └── JdbcSchemaInspector       read-only catalog lookups, table allow-list
 ├── src/main/resources/
 │   ├── application.yml
 │   ├── prompts/planner-system.txt  planner system prompt
 │   ├── prompts/repair-system.txt   generic repair agent instructions
-│   ├── prompts/orders-contract.txt order contract, tools and rules shown to the repair model
+│   ├── contracts/orders.schema.json  the order contract: single source of truth for the shape of an event
 │   └── db/migration/               V1 quarantine_event, V2 retry_schedule, V3 orders, V4 tier-2 columns, V5 dlq_audit_log, V6 unbounded text columns, V7 Strategy B retries
 └── src/test/java/com/example/dlqagent/
     ├── AbstractIntegrationTest.java  shared Testcontainers base class
@@ -531,18 +545,21 @@ mvn verify        # unit tests (*Test) in `test`, Testcontainers tests (*IT) in 
 
 Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch the containers that `docker-compose` runs and never call a real LLM (the API key is a dummy value). The **image versions are read from `docker-compose.yml`** (`ComposeImages`), so there is one place to change a version, local development and the tests cannot drift apart, and a Dependabot bump of a compose image is exercised by the full test suite on its own pull request.
 
-Current coverage (152 unit and 42 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
+Current coverage (165 unit and 46 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
 - `InfrastructureSmokeIT`: Flyway creates both tables, both topics exist, configuration binds.
 - `QuarantineFlowIT`: a corrupt event published to `orders-dlq` (with correlation ID, original-topic and stack-trace headers) appears in `quarantine_event` with all metadata; saving the same record twice writes one row; a NUL-containing payload is sanitized and stored.
 - `SpringAiRemediationPlannerTest` (13 tests, scripted `ChatModel`): each strategy maps correctly; low, out-of-range and threshold-boundary confidence; unknown strategy, non-JSON and missing fields; model exceptions; JSON braces in the payload do not break the template; prompt contents, truncation and fencing; a prompt-injection payload stays inside the data fence.
 - `RepairFlowIT`: Strategy A end to end with real Kafka and Postgres. A drifted event is repaired and read back from `orders-topic` with `x-repaired-by-agent`, correlation ID, summary and original headers; a hallucinated amount is rejected by the gate, quarantined and never replayed; an already-repaired event is quarantined without a loop.
-- `OrderContractValidatorTest` (23 tests): every schema rule, identity and key checks, amount preservation, and the hard-violation versus risk-flag classification (ambiguous dates, filled-in and renamed fields, status and currency mapping, mechanical fixes carrying no flags).
+- `OrdersContractTest` (26 tests): the order contract through the generic gate. Every shape rule, identity and key checks, number preservation, and the hard-violation versus risk-flag classification (ambiguous dates, filled-in and renamed fields, Unicode look-alikes), plus the deliberate differences (any three-letter currency is valid but changing one is flagged; Java-style timestamps).
+- `OrdersGateCorpusTest`: a digest over about 58,000 recorded verdicts (every order field crossed with 57 awkward values, every old/new value pair as a repair, three key cases). It was recorded after a differential run showed the schema-driven gate agreeing with the hand-written validator it replaced, apart from the one documented difference. A negative control was run: breaking the schema on purpose made that comparison fail with 122 disagreements.
+- `SchemaDrivenTopicAdapterTest` and `ContractToolsTest`: editable fields derived from the schema (a new scalar property becomes editable with no code), identity fields never editable, the prompt carries the schema and the enforced field sets, a policy that disagrees with the schema stops startup, exactly two tools with typed schemas.
+- `SecondContractRepairTest` (8 tests): a test-only `shipments` contract through the real repair agent, patch applier and gate, with no shipment-specific code.
+- `OrdersContractDriftIT` (4 tests, real Postgres): whatever the gate accepts the `orders` table accepts, `status` and `currency` match the table's CHECKs exactly, amount bounds match. A negative control (letting the schema accept a status the CHECK rejects) made it fail.
 - `PatchApplierTest` (engine only, mocked adapter) and `SchemaRepairAgentTest`: whitelist and bounds, identity fields unreachable, hallucinated amount and guessed date stopped by the gate, declined, empty and garbage proposals, model errors, non-JSON payloads and topics without an adapter never reach the model, the adapter's contract is sent per request.
-- `OrderTopicAdapterTest` and `TopicAdapterRegistryTest`: identity fields are never editable, the prompt's field lists match the enforced sets, lookup by topic, duplicate adapters fail fast.
-- `OrderSchemaToolsTest`: exactly two tools are exposed with the expected typed schemas; the generated tool callback works.
+- `TopicAdapterRegistryTest`: lookup by topic, duplicate adapters fail fast.
 - `JdbcSchemaInspectorIT`: reads the real catalog; refuses non-allow-listed tables, injection strings and `pg_catalog`.
 - `DlqTriageServiceTest` (24 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B (scheduled, exhausted, redelivery, spoofed topic, scheduler failure propagates).
-- Hardening tests: `QuarantineFlowIT` sends a 300-character key, a 100-character correlation id and a 300-character original-topic header and requires a quarantine row (not a stalled partition); `ApprovalFlowIT` proves form, `text/plain` and body-less POSTs to approve and reject are refused with 415 or 400 and change nothing; `LogSafeTest`, `FailureContextFactoryTest` (which correlation ids are trusted), `OrderContractValidatorTest` (Unicode look-alikes) and an immutability test for the records.
+- Hardening tests: `QuarantineFlowIT` sends a 300-character key, a 100-character correlation id and a 300-character original-topic header and requires a quarantine row (not a stalled partition); `ApprovalFlowIT` proves form, `text/plain` and body-less POSTs to approve and reject are refused with 415 or 400 and change nothing; `LogSafeTest`, `FailureContextFactoryTest` (which correlation ids are trusted), `OrdersContractTest` (Unicode look-alikes) and an immutability test for the records.
 - `CompressionCodecsIT` (5 tests): sends a compressible record through the real broker with each Kafka codec (gzip, snappy, lz4, zstd) and reads it back, and checks from the build's SBOM that snappy-java and lz4-java have not dropped below their security minimums. It exists because those codec libraries are transitive dependencies that nothing else in the suite touches (the app does not compress its own records) yet they receive security upgrades and Dependabot bumps; without it a green build says nothing about whether such an upgrade still works. It also gave the snappy-java upgrade its first real runtime check.
 - `RecordingToolCallbackTest`: records name, success and duration, rethrows failures unchanged, never keeps arguments or results.
 - `AuditFlowIT` (10 tests, real Kafka, Postgres and OpenTelemetry spans): audit rows for Tier 1, poison pills, Tier 2 and both human decisions (including the same `event_id` across stages and the `/api/audit` view); the table rejects `UPDATE` and `DELETE`; NUL characters in audit content are sanitized; recording twice writes one row; **a failing audit write rolls the quarantine row back**; and one trace links the Kafka consume, plan, repair, both Spring AI chat-client spans, the replay and the audit row's `trace_id`.
@@ -557,7 +574,7 @@ DLQ_LIVE_LLM=true OPENAI_API_KEY=sk-... mvn verify -Dit.test=LivePlannerEvalIT
 ```
 Run it again after changing provider or model to see whether routing changes.
 
-**Results so far** (OpenAI `gpt-4o-mini`, temperature 0, 2026-10-20): all 6 scenarios passed in each of 5 consecutive runs before Phase 5, and again in 3 consecutive runs after it. With Spring AI debug logging on, the repair agent was observed calling both `describeTable` and `validateOrderPayload` against the real adapter, so the live tool-calling loop works.
+**Results so far** (OpenAI `gpt-4o-mini`, temperature 0, 2026-10-20): all 6 scenarios passed in each of 5 consecutive runs before Phase 5, and again in 3 consecutive runs after it. With Spring AI debug logging on, the repair agent was observed calling both `describeTable` and the validation tool (then `validateOrderPayload`, now `validatePayload`) against the real adapter, so the live tool-calling loop works.
 
 **Findings from the Phase 5 live runs (3 runs, so treat as anecdotes, not rates):**
 - **The gate caught a guess the model made.** For the ambiguous date `03/04/2025`, the model guessed a day/month order in 2 of 3 runs and declined in the third. In the guessing runs the deterministic gate flagged the repair, so it went to Tier 2 and was not replayed automatically. Without the gate those would have been silently replayed with a possibly wrong date.
@@ -581,6 +598,8 @@ The Jaeger check also confirmed the exporter wiring: the four audit rows' `trace
 **Second real run, on newer infrastructure (2026-10-28):** Kafka **4.3.1** (a major version up from 3.8.0, with the unchanged 3.9.2 client) and Jaeger **1.76.0**, after Dependabot proposed both. Five events through the real model, after the tier policy change: all **3 text-amount events (`"21.50 USD"` to `"23.50 USD"`) went through Tier 1** and were replayed to `orders-topic` with the correct numeric amounts and `x-repaired-by-agent: true`; the corrupt event was quarantined with the model's rationale; the ambiguous date was declined by the model and quarantined. All five audit rows' `trace_id` values were found in Jaeger, with the complete span tree (`orders-dlq receive`, `dlq.triage`, `dlq.plan`, `dlq.repair`, the `tool_call` spans, `dlq.replay`, `orders-topic send`). The full test suite also passed against the 4.3.1 broker. Same caveat as before: repair confidence was again exactly 0.90.
 
 **Third real run: Strategy B (2026-10-29).** Real OpenAI `gpt-4o-mini`, Kafka 4.3.1, a throwaway Postgres 16 and Jaeger 1.76.0, with `retry.max-attempts` lowered to 3 to reach exhaustion quickly. One valid order was sent to `orders-dlq` with a hand-written stack trace (`TransientDataAccessResourceException: Could not open JDBC Connection ... ConnectException: Connection refused`). Observed: the model classified it as transient; the agent scheduled a retry and replayed it to `orders-topic` after the backoff with the payload byte for byte unchanged and `x-retry-attempt: 1` (no `x-repaired-by-agent`). To simulate the downstream failing again, the same event was re-sent to the DLQ three more times by hand: replays 2 and 3 followed, the fourth failure exhausted the budget and the event was quarantined as `TRANSIENT / PENDING_REVIEW` with the model's rationale, and **exactly 3 copies** (attempts 1, 2, 3) were on `orders-topic`, none after exhaustion. The audit log held the expected seven rows (`RETRY_SCHEDULED` and `RETRY_REPLAYED` per attempt, then `QUARANTINED`), all 7 audit `trace_id`s were found in Jaeger (the replay traces contain `dlq.retry`, `dlq.replay` and `orders-topic send`), and the application log had no warnings or errors. Caveats: it is a single event and a single scenario; the stack trace was written by hand, not produced by a real failing consumer; "the downstream failed again" was simulated by re-sending; the circuit breaker never tripped in this run (3 failures, threshold 5), so the breaker is covered only by the automated tests; and the real model's behaviour on other transient failures, or on borderline ones, was not measured.
+
+**Fourth real run: schema-driven Strategy A (2026-11-01).** Real OpenAI `gpt-4o-mini`, Kafka 4.3.1 and a throwaway Postgres 16, after Phase 7b replaced the hand-written order rules, with the schema and the generated prompt now driving the gate. Five events with a hand-written constraint-violation stack trace: **3 of 3 text-amount events** (`"21.50 USD"`, `"22.50 USD"`, `"23.50 USD"`) were repaired and replayed automatically (Tier 1) to `orders-topic` with the correct numeric amounts (21.50, 22.50, 23.50) and the audit headers; the truncated JSON event was quarantined with the model's rationale; the ambiguous `03/04/2025` date was held for a human (Tier 2) with the gate's flag. Two re-runs of the live evaluation (`LivePlannerEvalIT`) passed 6/6. The application log had no warnings or errors. Observations and caveats: (1) **the model made no tool calls** in any of these repairs, nor in the live evaluation's repair scenario, where before it made 2 to 3; with the whole schema in the prompt it does not ask for the tools. The tools are attached (a unit test checks the request options) and a one-off probe showed the real model calls `validatePayload` when told to, so this is the model's choice; (2) repair confidence was again exactly `0.90`, the threshold, so it still works by alignment, not calibration; (3) this is a handful of events, not an accuracy measure, and the stack traces were written by hand.
 
 **What this does and does not show.**
 - It is a smoke-level check: one scenario per category, 6 in total. It shows that the prompts, structured-output parsing, tool wiring and gate work together with a real model. It is **not** an accuracy measurement, and it says nothing about messier real-world payloads or about other models.
@@ -618,6 +637,10 @@ Application settings (`dlqagent.*`, validated at startup):
 | `planner.min-confidence` | `0.7` | Below this, the event is quarantined |
 | `planner.max-payload-chars` | `4000` | Payload (and headers) sent to the model are truncated beyond this |
 | `planner.max-stack-trace-chars` | `2000` | Stack trace sent to the model is truncated beyond this |
+| `contract.schema` | `classpath:contracts/orders.schema.json` | JSON Schema of the main topic's events: the single source of truth for shape |
+| `contract.identity-fields` | `[orderId, customerId]` | Never edited or dropped by the agent; must be unchanged in a repair |
+| `contract.key-field` | `orderId` | Must equal the Kafka key |
+| `contract.no-future-fields` | `[createdAt]` | Timestamps the schema cannot bound; later than now plus 5 minutes is a hard violation |
 | `gate.auto-replay-min-confidence` | `0.9` | Tier 1 needs the repair's confidence at or above this; below it a repair waits for a human |
 
 ## Switching the LLM provider
@@ -646,7 +669,7 @@ Managed by Flyway (`src/main/resources/db/migration`).
 
 **`dlq_audit_log`**: the append-only audit trail described above (V5). Indexed by correlation ID and event ID; `UPDATE` and `DELETE` are blocked by a trigger.
 
-**`orders`**: reference schema for the order domain, read by the schema tool (never written by this service). Its CHECK constraints mirror the order Evaluator Gate's rules and should be kept in sync.
+**`orders`**: reference schema for the order domain, read by the `describeTable` tool (never written by this service). Its CHECK constraints are the consumer's contract; `OrdersContractDriftIT` fails if `contracts/orders.schema.json` accepts something the table rejects.
 
 **`retry_schedule`** (V2, used since V7): durable Strategy B retries. Stores the event, a unique content `fingerprint`, `attempt` (replays already sent), `next_attempt_at`, `last_event_id` (the DLQ record that last scheduled it, so a redelivered record is not counted as a new failure) and a `status`: `SCHEDULED`, `REPLAYED` (sent; nothing has come back yet) or `EXHAUSTED`. There is no in-flight state: a row is claimed and replayed in one transaction. Postgres-backed rather than in-memory so the attempt budget survives restarts.
 
@@ -662,6 +685,7 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 5 | Two-tier gate: hard violations vs risk flags; Tier 1 auto-replay, Tier 2 `PENDING_HUMAN_APPROVAL` persisted; approve/reject API (Spring Security) | ✅ Done |
 | 6 | `dlq_audit_log` (diffs, rationale, tool-call summaries, tier decision, outcome; append-only), `/api/audit`, Micrometer tracing with OTLP export | ✅ Done |
 | 7 | Strategy B: durable backoff schedule and poller, unchanged replay, content-fingerprint attempt budget, outcome-based circuit breaker. Tested end to end with a scripted model, and run once with the real model on the real stack. A health-check tool was designed out (see [Strategy B](#strategy-b-transient-retry)) | ✅ Done |
+| 7b | **Schema-driven Strategy A.** Contract as one JSON Schema plus a small policy; editable fields, prompt, validation tool and gate derived from it; the hand-written order validator and allowlist deleted after a differential run; drift test against the real table; a second contract proves no new Java is needed. Behaviour-preserving for orders, with one documented difference. Not built: a schema registry source, and widening Tier 1 (that waits for the Phase 8 eval) | ✅ Done |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
 | 11 (idea) | **Optional active probes for Strategy B.** Today the breaker only watches whether replayed events come back. An active probe could stop retries earlier. It would be *discovered, not listed*: read from a service registry or catalog (for example an actuator health URL each owning team publishes), so it stays current as services change. The model may propose which dependency looks involved from the stack trace; deterministic code accepts it only if it exists in the registry (the same propose-then-validate pattern as Strategy A), and an unmapped dependency fails closed with an audit entry and a metric so the gap is visible. The probe target must never come from the stack trace itself (SSRF). Needs a real registry to build and test honestly | Backlog |

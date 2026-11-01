@@ -148,6 +148,18 @@ class SchemaRepairAgentTest {
     }
 
     @Test
+    void bothToolDefinitionsAreAttachedToEveryModelRequest() {
+        model.respondWith(p -> proposal(false, "x", "[]", "[]"));
+
+        agent.repair(failure(DRIFTED));
+
+        // The contract text reaching the model proves nothing about the tools: check the request options themselves.
+        var options = (org.springframework.ai.model.tool.ToolCallingChatOptions) model.lastPrompt().getOptions();
+        assertThat(options.getToolCallbacks().stream().map(t -> t.getToolDefinition().name()))
+                .containsExactlyInAnyOrder("describeTable", "validatePayload");
+    }
+
+    @Test
     void droppingIdentityFieldIsRejected() {
         var result = repairWith(DRIFTED, proposal(true, "x", "[]", "[\"customerId\"]"));
 
