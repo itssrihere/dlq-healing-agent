@@ -4,6 +4,7 @@ import com.example.dlqagent.domain.Evaluation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -116,8 +117,23 @@ final class ChangeRules {
                 flags.add(spec.name() + " '" + was + "' is ambiguous (day/month order unknown)");
             }
         }
-        if (now != null && !was.equals(now) && parseTimestamp(was) == null) {
-            flags.add(spec.name() + " reformatted from '" + was + "'; time of day and zone were assumed");
+        if (now != null && !was.equals(now) && !isIso(spec, was)) {
+            // a plain date has no time or zone to assume; a date-time does
+            flags.add(spec.name() + " reformatted from '" + was + "'"
+                    + ("date".equals(spec.format()) ? "" : "; time of day and zone were assumed"));
+        }
+    }
+
+    private static boolean isIso(FieldSpec spec, String text) {
+        try {
+            if ("date".equals(spec.format())) {
+                LocalDate.parse(text);
+            } else {
+                OffsetDateTime.parse(text);
+            }
+            return true;
+        } catch (DateTimeParseException e) {
+            return false;
         }
     }
 
@@ -170,16 +186,5 @@ final class ChangeRules {
 
     private static String textOrNull(JsonNode n) {
         return n != null && n.isTextual() ? n.asText() : null;
-    }
-
-    private static OffsetDateTime parseTimestamp(String s) {
-        if (s == null) {
-            return null;
-        }
-        try {
-            return OffsetDateTime.parse(s);
-        } catch (DateTimeParseException e) {
-            return null;
-        }
     }
 }
