@@ -1,17 +1,16 @@
-package com.example.dlqagent.orders;
+package com.example.dlqagent.contract;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.math.BigDecimal;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
+import com.example.dlqagent.domain.Evaluation;
+import com.example.dlqagent.support.OrdersContract;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class OrderContractValidatorTest {
+/** The order contract (contracts/orders.schema.json plus the orders policy) as seen through the generic gate. */
+class OrdersContractTest {
 
-    private final OrderContractValidator gate = new OrderContractValidator(Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC));
+    private final SchemaDrivenTopicAdapter gate = OrdersContract.adapter();
 
     private static String order(String amount, String createdAt) {
         return """
@@ -21,60 +20,82 @@ class OrderContractValidatorTest {
 
     private static final String VALID = order("19.99", "\"2025-04-03T10:00:00Z\"");
 
-    private EvaluationResult evaluate(String original, String candidate) {
+    private Evaluation evaluate(String original, String candidate) {
         return gate.evaluate(original, candidate, "o-1");
     }
 
-    // ---- schema rules --------------------------------------------------------------------------------------
+    // ---- shape rules ---------------------------------------------------------------------------------------
 
     @Test
-    void validPayloadHasNoViolationsAndYieldsTypedEvent() {
-        EvaluationResult r = evaluate(VALID, VALID);
-
-        assertThat(r.passed()).isTrue();
-        assertThat(r.event().amount()).isEqualByComparingTo("19.99");
-        assertThat(r.event().status()).isEqualTo(OrderStatus.PAID);
-        assertThat(r.event().createdAt()).isEqualTo(Instant.parse("2025-04-03T10:00:00Z"));
+    void validPayloadHasNoViolations() {
+        assertThat(evaluate(VALID, VALID).rejected()).isFalse();
+        assertThat(evaluate(VALID, VALID).riskFlags()).isEmpty();
     }
 
     @Test
-    void validateReportsEveryBrokenRule() {
+    void validateReportsEveryBrokenRuleAndNamesTheField() {
         var violations = gate.validate("""
                 {"orderId":"bad id!","customerId":"","amount":-5.123,"currency":"usd","status":"LOST",
                  "createdAt":"yesterday","extra":1}""");
 
-        assertThat(violations).anyMatch(v -> v.contains("orderId"))
-                .anyMatch(v -> v.contains("customerId"))
-                .anyMatch(v -> v.contains("greater than 0"))
-                .anyMatch(v -> v.contains("2 decimal places"))
-                .anyMatch(v -> v.contains("currency"))
-                .anyMatch(v -> v.contains("status"))
-                .anyMatch(v -> v.contains("createdAt"))
-                .anyMatch(v -> v.contains("unknown field 'extra'"));
+        assertThat(violations).anyMatch(v -> v.startsWith("orderId "))
+                .anyMatch(v -> v.startsWith("customerId "))
+                .anyMatch(v -> v.startsWith("amount ") && v.contains("exclusive minimum"))
+                .anyMatch(v -> v.startsWith("amount ") && v.contains("multiple of 0.01"))
+                .anyMatch(v -> v.startsWith("currency "))
+                .anyMatch(v -> v.startsWith("status "))
+                .anyMatch(v -> v.startsWith("createdAt "))
+                .anyMatch(v -> v.contains("'extra'"));
+    }
+
+    @Test
+    void missingRequiredFieldIsNamed() {
+        assertThat(gate.validate(VALID.replace(",\"createdAt\":\"2025-04-03T10:00:00Z\"", "")))
+                .anyMatch(v -> v.contains("required") && v.contains("createdAt"));
     }
 
     @Test
     void amountMustBeANumberNotText() {
         assertThat(gate.validate(order("\"19.99\"", "\"2025-04-03T10:00:00Z\"")))
-                .contains("amount must be a JSON number");
+                .anyMatch(v -> v.startsWith("amount ") && v.contains("number expected"));
     }
 
     @Test
     void amountUpperBoundAndZero() {
-        assertThat(gate.validate(order("10000000000", "\"2025-04-03T10:00:00Z\""))).anyMatch(v -> v.contains("below"));
-        assertThat(gate.validate(order("0", "\"2025-04-03T10:00:00Z\""))).anyMatch(v -> v.contains("greater than 0"));
+        assertThat(gate.validate(order("10000000000", "\"2025-04-03T10:00:00Z\""))).anyMatch(v -> v.contains("exclusive maximum"));
+        assertThat(gate.validate(order("0", "\"2025-04-03T10:00:00Z\""))).anyMatch(v -> v.contains("exclusive minimum"));
         assertThat(gate.validate(order("100", "\"2025-04-03T10:00:00Z\""))).isEmpty();
     }
 
+    /**
+     * Deliberate difference from the hand-written validator this replaced: it also demanded a real ISO-4217 code.
+     * The consumer's own contract (the orders table CHECK) requires only three uppercase letters, so that is the
+     * contract. Inventing a different currency is still caught, as a mapping a human must confirm.
+     */
     @Test
-    void unknownCurrencyCodeIsRejected() {
-        assertThat(gate.validate(VALID.replace("USD", "ZZZ"))).anyMatch(v -> v.contains("ISO-4217"));
+    void anyThreeUppercaseLettersIsAValidCurrencyButChangingOneIsFlagged() {
+        assertThat(gate.validate(VALID.replace("USD", "ZZZ"))).isEmpty();
+        assertThat(evaluate(VALID, VALID.replace("USD", "EUR")).riskFlags()).anyMatch(v -> v.contains("currency mapped"));
     }
 
     @Test
-    void futureTimestampBeyondSkewIsRejected() {
+    void futureTimestampBeyondSkewIsRejectedAndNearFutureIsNot() {
         assertThat(gate.validate(order("1", "\"2025-06-01T00:10:00Z\""))).contains("createdAt is in the future");
         assertThat(gate.validate(order("1", "\"2025-06-01T00:04:00Z\""))).isEmpty();
+    }
+
+    @Test
+    void timestampsAreParsedTheWayTheJavaConsumerParsesThem() {
+        assertThat(gate.validate(order("1", "\"2025-04-03t10:00:00z\""))).isEmpty();      // lowercase t and z
+        assertThat(gate.validate(order("1", "\"2025-04-03T10:00:00-00:00\""))).isEmpty(); // unknown-offset form
+        assertThat(gate.validate(order("1", "\"2025-04-03T10:00:00\""))).isNotEmpty();    // no offset
+        assertThat(gate.validate(order("1", "\"2025-02-30T10:00:00Z\""))).isNotEmpty();   // no such day
+    }
+
+    @Test
+    void controlCharactersInAStringAreRejected() {
+        // a regex "$" can match before a trailing newline, so the gate refuses control characters outright
+        assertThat(gate.validate(VALID.replace("\"o-1\"", "\"o-1\\n\""))).anyMatch(v -> v.contains("control characters"));
     }
 
     @Test
@@ -96,7 +117,7 @@ class OrderContractValidatorTest {
     void textAmountWithUnitIsRepairableToTheSameNumber() {
         String original = order("\"19.99 USD\"", "\"2025-04-03T10:00:00Z\"");
 
-        assertThat(evaluate(original, VALID).passed()).isTrue();
+        assertThat(evaluate(original, VALID).rejected()).isFalse();
     }
 
     @Test
@@ -129,7 +150,7 @@ class OrderContractValidatorTest {
     void orderIdMustMatchKafkaKey() {
         assertThat(gate.evaluate(VALID, VALID, "some-other-key").violations())
                 .anyMatch(v -> v.contains("Kafka key"));
-        assertThat(gate.evaluate(VALID, VALID, null).passed()).isTrue();
+        assertThat(gate.evaluate(VALID, VALID, null).rejected()).isFalse();
     }
 
     @Test
@@ -146,7 +167,7 @@ class OrderContractValidatorTest {
         // 25 cannot be a month; day == month. Not ambiguous, though the reformat still assumes time and zone.
         for (String date : List.of("25/04/2025", "03/03/2025")) {
             var result = evaluate(order("19.99", "\"" + date + "\""), VALID);
-            assertThat(result.passed()).isTrue();
+            assertThat(result.rejected()).isFalse();
             assertThat(result.riskFlags()).noneMatch(v -> v.contains("ambiguous"))
                     .anyMatch(v -> v.contains("time of day and zone were assumed"));
         }
@@ -166,7 +187,7 @@ class OrderContractValidatorTest {
         String original = VALID.replace("\"amount\"", "\"total\"");
 
         var result = evaluate(original, VALID);
-        assertThat(result.passed()).isTrue();
+        assertThat(result.rejected()).isFalse();
         assertThat(result.riskFlags()).anyMatch(v -> v.contains("renamed") && v.contains("total") && v.contains("amount"));
     }
 
@@ -177,14 +198,7 @@ class OrderContractValidatorTest {
 
     @Test
     void unparseableCandidateIsRejected() {
-        assertThat(evaluate(VALID, "{").passed()).isFalse();
-    }
-
-    @Test
-    void passedResultCarriesNoViolationsAndFailedResultCarriesNoEvent() {
-        assertThat(evaluate(VALID, VALID.replace("PAID", "LOST")).event()).isNull();
-        assertThat(evaluate(VALID, VALID).violations()).isEmpty();
-        assertThat(new BigDecimal("19.99")).isEqualByComparingTo(evaluate(VALID, VALID).event().amount());
+        assertThat(evaluate(VALID, "{").rejected()).isTrue();
     }
 
     // ---- Tier 1 versus Tier 2 classification -------------------------------------------------------------------
@@ -198,7 +212,7 @@ class OrderContractValidatorTest {
         assertThat(evaluate(textAmount, VALID).riskFlags()).isEmpty();
         assertThat(evaluate(lowercase, VALID).riskFlags()).isEmpty();  // case normalization is formatting
         assertThat(evaluate(extraField, VALID).riskFlags()).isEmpty(); // dropping an unknown field
-        assertThat(evaluate(extraField, VALID).passed()).isTrue();
+        assertThat(evaluate(extraField, VALID).rejected()).isFalse();
     }
 
     @Test
@@ -214,21 +228,21 @@ class OrderContractValidatorTest {
     void numericallyChangedAmountIsAHardViolationNotAFlag() {
         var result = evaluate(VALID, order("29.99", "\"2025-04-03T10:00:00Z\""));
 
-        assertThat(result.passed()).isFalse();
+        assertThat(result.rejected()).isTrue();
         assertThat(result.riskFlags()).isEmpty();
     }
 
     @Test
     void unicodeLookalikesAreAMappingNotACaseChange() {
-        // "\u017Fhipped" starts with a long s: String.equalsIgnoreCase says it equals "SHIPPED", which would hide a
+        // "ſhipped" starts with a long s: String.equalsIgnoreCase says it equals "SHIPPED", which would hide a
         // real remapping as formatting and let it through to Tier 1.
-        String longS = VALID.replace("\"PAID\"", "\"\u017Fhipped\"");
+        String longS = VALID.replace("\"PAID\"", "\"ſhipped\"");
         String shipped = VALID.replace("\"PAID\"", "\"SHIPPED\"");
 
         assertThat(evaluate(longS, shipped).riskFlags()).anyMatch(v -> v.contains("status mapped"));
-        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("shipped", "SHIPPED")).isTrue();
-        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("\u017Fhipped", "SHIPPED")).isFalse();
-        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("u\u017Fd", "USD")).isFalse();
-        assertThat(OrderContractValidator.asciiEqualsIgnoreCase("USD", "USDX")).isFalse();
+        assertThat(ChangeRules.asciiEqualsIgnoreCase("shipped", "SHIPPED")).isTrue();
+        assertThat(ChangeRules.asciiEqualsIgnoreCase("ſhipped", "SHIPPED")).isFalse();
+        assertThat(ChangeRules.asciiEqualsIgnoreCase("uſd", "USD")).isFalse();
+        assertThat(ChangeRules.asciiEqualsIgnoreCase("USD", "USDX")).isFalse();
     }
 }

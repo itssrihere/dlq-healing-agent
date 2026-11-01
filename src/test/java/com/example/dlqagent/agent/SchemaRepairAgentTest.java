@@ -1,15 +1,12 @@
 package com.example.dlqagent.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
 
 import com.example.dlqagent.domain.FailureContext;
 import com.example.dlqagent.domain.FieldChange;
 import com.example.dlqagent.domain.RepairResult;
-import com.example.dlqagent.domain.SchemaInspector;
-import com.example.dlqagent.orders.OrderContractValidator;
-import com.example.dlqagent.orders.OrderSchemaTools;
-import com.example.dlqagent.orders.OrderTopicAdapter;
+import com.example.dlqagent.contract.SchemaDrivenTopicAdapter;
+import com.example.dlqagent.support.OrdersContract;
 import com.example.dlqagent.support.TestProps;
 import com.example.dlqagent.support.ScriptedChatModel;
 import java.time.Instant;
@@ -25,9 +22,7 @@ class SchemaRepairAgentTest {
             {"orderId":"o-1","customerId":"c-1","amount":"19.99 USD","currency":"USD","status":"PAID","createdAt":"2025-04-03T10:00:00Z"}""";
 
     private final ScriptedChatModel model = ScriptedChatModel.replying("unset");
-    private final OrderContractValidator validator = new OrderContractValidator();
-    private final OrderTopicAdapter adapter = new OrderTopicAdapter("orders-topic", validator,
-            new OrderSchemaTools(mock(SchemaInspector.class), validator), "ORDER CONTRACT TEXT");
+    private final SchemaDrivenTopicAdapter adapter = OrdersContract.adapter();
     private final SchemaRepairAgent agent = new SchemaRepairAgent(
             ChatClient.builder(model),
             new TopicAdapterRegistry(List.of(adapter)),
@@ -149,7 +144,7 @@ class SchemaRepairAgentTest {
         agent.repair(failure(DRIFTED));
 
         String system = ScriptedChatModel.systemText(model.lastPrompt());
-        assertThat(system).contains("repair agent", "ORDER CONTRACT TEXT");
+        assertThat(system).contains("repair agent", "TOPIC CONTRACT for orders-topic", "EDITABLE FIELDS");
     }
 
     @Test

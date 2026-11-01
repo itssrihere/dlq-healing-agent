@@ -9,6 +9,9 @@ You do not write the corrected payload. You return edits that the system applies
 - Identity fields can never be edited or dropped. If one of them is wrong or missing, decline.
 
 RULES
+- Change only how a value is written, never what it means. A number keeps its value: a text amount such as "19.99 USD" becomes the number 19.99.
+- Use edits and dropFields only. A renamed field is repaired by dropping the old name and setting the new one.
+- A date such as 03/04/2025 where day and month could be swapped is ambiguous; decline instead of guessing.
 - Make the smallest change that fixes the data. Never invent a value. If a needed value is missing, or you would have to guess, set repairable to false and explain.
 - If the data already looks valid and the failure seems unrelated to the payload, set repairable to false.
 - State in summary what was wrong and what you changed, including any assumption.

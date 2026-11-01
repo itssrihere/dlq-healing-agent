@@ -3,7 +3,7 @@ package com.example.dlqagent.domain;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.example.dlqagent.orders.OrderSchemaTools;
+import com.example.dlqagent.contract.ContractTools;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -36,7 +36,7 @@ class ImmutabilityTest {
         var schema = new SchemaInspector.TableSchema("orders", new ArrayList<>(), constraints);
         constraints.add("CHECK");
         List<String> violations = new ArrayList<>(List.of("v"));
-        var report = new OrderSchemaTools.ValidationReport(false, violations);
+        var report = new ContractTools.ValidationReport(false, violations);
         violations.clear();
 
         assertThat(schema.constraints()).containsExactly("PRIMARY KEY");

@@ -82,7 +82,7 @@ public final class SchemaContract {
         List<String> found = new ArrayList<>();
         List<String> messages = new ArrayList<>();
         for (Error error : schema.validate(payload)) {
-            messages.add(error.getMessage());
+            messages.add(describe(error));
         }
         messages.stream().sorted().limit(MAX_ERRORS).forEach(found::add);
         payload.fields().forEachRemaining(e -> {
@@ -97,6 +97,13 @@ public final class SchemaContract {
             }
         });
         return found;
+    }
+
+    /** The library's message alone does not say which field failed ("does not match the regex pattern ..."). */
+    private static String describe(Error error) {
+        String pointer = String.valueOf(error.getInstanceLocation()); // a JSON pointer such as /amount
+        String field = pointer.startsWith("/") ? pointer.substring(1).replace('/', '.') : pointer;
+        return field.isEmpty() ? error.getMessage() : field + " " + error.getMessage();
     }
 
     private void checkDate(FieldSpec field, String text, List<String> found) {

@@ -1,27 +1,30 @@
-package com.example.dlqagent.orders;
+package com.example.dlqagent.contract;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.example.dlqagent.domain.SchemaInspector;
+import com.example.dlqagent.support.OrdersContract;
 import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 
-class OrderSchemaToolsTest {
+class ContractToolsTest {
 
     private final SchemaInspector inspector = mock(SchemaInspector.class);
-    private final OrderSchemaTools tools = new OrderSchemaTools(inspector, new OrderContractValidator());
+    private final ContractTools tools = new ContractTools(inspector,
+            new SchemaDrivenTopicAdapter("orders-topic",
+                    new SchemaContract(OrdersContract.schema(), OrdersContract.policy(), OrdersContract.CLOCK), inspector));
 
     @Test
     void exposesExactlyTwoReadOnlyTools() {
         ToolCallback[] callbacks = ToolCallbacks.from(tools);
 
         assertThat(Arrays.stream(callbacks).map(c -> c.getToolDefinition().name()))
-                .containsExactlyInAnyOrder("describeTable", "validateOrderPayload");
+                .containsExactlyInAnyOrder("describeTable", "validatePayload");
         assertThat(Arrays.stream(callbacks).map(c -> c.getToolDefinition().inputSchema()))
                 .anyMatch(s -> s.contains("tableName"))
                 .anyMatch(s -> s.contains("json"));
@@ -30,11 +33,11 @@ class OrderSchemaToolsTest {
     @Test
     void toolCallbackInvokesValidationWithTypedJsonArguments() {
         ToolCallback validate = Arrays.stream(ToolCallbacks.from(tools))
-                .filter(c -> c.getToolDefinition().name().equals("validateOrderPayload")).findFirst().orElseThrow();
+                .filter(c -> c.getToolDefinition().name().equals("validatePayload")).findFirst().orElseThrow();
 
         String result = validate.call("{\"json\": \"{\\\"orderId\\\": \\\"o-1\\\"}\"}");
 
-        assertThat(result).contains("\"valid\":false").contains("customerId is required");
+        assertThat(result).contains("\"valid\":false").contains("customerId");
     }
 
     @Test

@@ -72,7 +72,7 @@ public final class SchemaDrivenTopicAdapter implements TopicAdapter {
 
     @Override
     public Map<String, FieldType> editableFields() {
-        return editable;
+        return Map.copyOf(editable); // already immutable, so this returns the same instance; it just keeps the field private
     }
 
     @Override
