@@ -314,7 +314,7 @@ Both tools run as pinned Docker images (Syft 1.55.0, Grype 0.121.0), so nothing 
 | Library | Advisory type | Relevance here | Action |
 |---|---|---|---|
 | Jackson 2.21.4 | parser denial of service (several High) | **Reachable**: this service parses untrusted DLQ payloads | Upgraded to 2.21.7 |
-| OpenTelemetry 1.49.0 | unbounded allocation parsing W3C baggage headers | **Reachable**: Kafka trace headers come from producers | Upgraded to 1.62.0 **and** baggage propagation turned off (unused) |
+| OpenTelemetry 1.49.0 | unbounded allocation parsing W3C baggage headers | **Reachable**: Kafka trace headers come from producers | Upgraded to 1.62.0 **and** baggage propagation turned off (unused). Later bumped to 1.67.0 for a Medium advisory (GHSA-ccrj-gw8r-854m) that the scan reported once its database updated; OTLP export was re-checked against a real Jaeger (the tests use an in-memory exporter, so the build alone would not catch an export break) |
 | Tomcat 10.1.55 | DIGEST and FORM authenticator bypass (Critical) | Not reachable (Spring Security does the authentication), but a fix exists | Upgraded to 10.1.61 |
 | PostgreSQL JDBC 42.7.11, lz4-java 1.10.1, log4j-api 2.24.3 | channel-binding downgrade, temp-file race, minor | Low exposure, fixes exist | Upgraded to 42.7.12, 1.11.4, 2.25.5 |
 | snappy-java 1.1.10.5 (via kafka-clients) | heap overflow, unbounded allocation from an attacker-declared length, JVM crash (2 High, 1 Medium). **Published on 2026-10-27, after the first scan, and caught by the scheduled scan the next day** | Reachable in principle: Kafka decompresses records a producer compressed with snappy (we do not compress ourselves) | Upgraded to 1.1.10.12 |

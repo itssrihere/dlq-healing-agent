@@ -30,7 +30,7 @@
         <jackson-bom.version>2.21.7</jackson-bom.version>     <!-- parser DoS advisories; this service parses untrusted JSON -->
         <postgresql.version>42.7.12</postgresql.version>      <!-- channel-binding downgrade -->
         <log4j2.version>2.25.5</log4j2.version>               <!-- log4j-api, via spring-boot-starter-logging -->
-        <opentelemetry.version>1.62.0</opentelemetry.version> <!-- unbounded allocation parsing W3C baggage headers (producer-controlled) -->
+        <opentelemetry.version>1.67.0</opentelemetry.version> <!-- W3C baggage parsing allocation (producer-controlled input) fixed in 1.62; GHSA-ccrj-gw8r-854m (Medium) fixed in 1.67 -->
     </properties>
 
     <dependencyManagement>
