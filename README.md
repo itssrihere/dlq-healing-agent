@@ -2,7 +2,7 @@
 
 An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It listens to a DLQ, uses an LLM-driven *Remediation Planner* to decide what to do with each failed event, and then repairs and replays it, retries it later, or quarantines it for a human.
 
-> **Status: Phases 1–7 and 7b (schema-driven contracts) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
+> **Status: Phases 1–7, 7b (schema-driven contracts) and 7c (several DLQs as independent streams) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
 
 ## Contents
 - [AI-assisted development](#ai-assisted-development)
@@ -70,16 +70,45 @@ Fallbacks, all of which end in quarantine:
 - The planner's output is unparseable, has an unknown strategy or an out-of-range confidence, or confidence is below `dlqagent.planner.min-confidence` (**implemented**).
 - Strategy A: the repair agent declines, errors, returns garbage, proposes a patch that cannot be applied, or proposes a patch with a hard violation (**implemented**). Patches with only risk flags are not quarantined; they go to Tier 2.
 - The event is not a JSON object, so it is never sent to the repair model (**implemented**).
-- The `original-topic` header names a topic other than `orders-topic` (**implemented**).
+- The `original-topic` header names a topic other than the stream's own source topic (**implemented**).
 - The event already carries `x-repaired-by-agent` and failed again (**implemented**, loop guard).
 - Strategy B: the event fails again after `retry.max-attempts` replays (**implemented**), or its `original-topic` header names another topic (**implemented**).
 
 ### Event flow in detail (implemented part)
-1. `DlqListener` consumes `orders-dlq` with manual acknowledgement.
-2. `FailureContextFactory` builds a `FailureContext`: payload, key, headers, stack trace, partition, offset. It reads the standard Spring dead-letter headers `kafka_dlt-original-topic` and `kafka_dlt-exception-stacktrace`.
+1. A listener container per stream (`StreamListeners`) consumes that stream's DLQ with manual acknowledgement.
+2. `FailureContextFactory` builds a `FailureContext`: the stream, payload, key, headers, stack trace, partition, offset. It reads the standard Spring dead-letter headers `kafka_dlt-original-topic` and `kafka_dlt-exception-stacktrace`.
 3. The correlation ID comes from the `x-correlation-id` header, or a UUID is generated if absent. It is placed in the logging MDC (`[cid=...]` in every log line) and stored with the quarantine row.
 4. `DlqTriageService` asks the `RemediationPlanner` port for a `RemediationPlan` (see [The Remediation Planner](#the-remediation-planner)) and does an exhaustive `switch` on it.
 5. The outcome is persisted (a replay, a Tier 2 hold, or a quarantine), an audit row is written, and only then is the Kafka offset committed.
+
+### Streams: healing several DLQs (Phase 7c)
+A **stream** is one DLQ and everything needed to heal it: its single source topic, its contract, its tier policy, its retry budget and its own circuit breaker. `dlqagent.streams` is a list; each entry is one stream:
+
+```yaml
+dlqagent:
+  streams:
+    - name: orders
+      dlq-topic: orders-dlq
+      source-topic: orders-topic          # the only topic this stream may replay to
+      group-id: dlq-healing-agent         # keep an existing id: a new one re-reads the whole DLQ
+      contract: {schema: ..., identity-fields: [...], key-field: ..., no-future-fields: [...], tables: [orders]}
+      # auto-replay: false                # every repair of this stream waits for a human
+      # auto-replay-min-confidence: 0.9   # per-stream override of gate.auto-replay-min-confidence
+      # max-attempts: 5                   # per-stream override of retry.max-attempts
+```
+
+A DLQ belongs to exactly one source topic (a shared DLQ for several sources is deliberately not supported). `StreamRegistry` builds every stream at start-up and **stops the service if any is invalid**, with a message naming it (a duplicate name, DLQ topic, source topic or consumer group; a topic that is both someone's DLQ and someone's source; a policy naming a field the schema lacks; a schema file that will not load). Running without one silently would leave its DLQ unattended.
+
+How a record flows: the stream's own listener container reads it, and the stream decides the contract, the source topic and the tier policy for everything after. The `original-topic` header is still only a claim by the producer: it must equal the stream's source topic, otherwise the event is quarantined (a missing header defaults to the source topic).
+
+What is isolated per stream, and why:
+- **Listener and consumer group.** An infrastructure failure makes a listener retry forever; with one shared container that would stall every stream. Each stream has its own container, so it stalls only itself.
+- **Circuit breaker and retry budget.** If the orders downstream is down, shipments retries keep going. The poller serves streams in turn, and a retry row is only ever replayed to its stream's current source topic.
+- **Tier policy.** One stream can be set to never auto-replay without touching the others.
+- **Tools.** The model's `describeTable` tool only sees the tables listed for its own stream.
+- **Data.** `quarantine_event`, `retry_schedule` and `dlq_audit_log` record the stream (V8; rows from before streams existed were backfilled as `orders`). `GET /api/approvals?stream=...` lists one stream's held repairs.
+
+Honest limits: all streams share one database, one process, one model and its rate limits, and one reviewer account (per-stream reviewer roles are future work). Each running copy keeps its own circuit breaker state. `dlqagent.topics.declare` (default `true`) makes the service create the topics it names; set it to `false` anywhere topics are managed elsewhere. A stream's `description` as a prompt hint was considered and not built.
 
 ### How the model learns about the failure
 The model is *given* the failure details; it does not look them up. The main service's dead-letter publisher (Spring Kafka's `DeadLetterPublishingRecoverer`) puts the Java stack trace in the `kafka_dlt-exception-stacktrace` header. `FailureContextFactory` reads it into `FailureContext.stackTrace`, and `FailurePrompt` places the payload, headers and stack trace in the prompt between random delimiter lines (the model is told they are untrusted data). The stack trace is cut at `planner.max-stack-trace-chars` (2000).
@@ -138,7 +167,7 @@ Honest limits:
 ### Strategy A: schema repair and replay
 `SchemaRepairAgent` (the `PayloadRepairer` port) handles `SchemaRepair` plans. It is **generic**: everything topic-specific comes from a `TopicAdapter`.
 
-**One contract, derived rules (Phase 7b).** A topic's contract is one JSON Schema document (`contracts/orders.schema.json`) plus a small policy in configuration (`dlqagent.contract`): which fields are identity, which field must equal the Kafka key, which timestamps may not be in the future. `SchemaDrivenTopicAdapter` derives everything else from them:
+**One contract, derived rules (Phase 7b).** A topic's contract is one JSON Schema document (`contracts/orders.schema.json`) plus a small policy in configuration (`dlqagent.streams[].contract`): which fields are identity, which field must equal the Kafka key, which timestamps may not be in the future. `SchemaDrivenTopicAdapter` derives everything else from them:
 - the model's prompt: the schema itself, plus generated lists of the editable and identity fields;
 - the **editable fields**: every plain string or number property that is not an identity field (nested objects, arrays and booleans are never editable). There is no hand-kept allowlist: add a property to the schema and it becomes editable;
 - the validation tool and the **shape check** of the gate, run by a JSON Schema validator (`networknt json-schema-validator`). Properties declared `format: date` or `date-time` are checked with the Java parser a Java consumer uses, and a regex-level newline trick is closed by rejecting control characters in any string;
@@ -152,7 +181,7 @@ What stays hand-written, on purpose, is the small policy (identity fields, key f
 
 **Keeping the schema and the database in step.** The `orders` table is the reference consumer's storage. `OrdersContractDriftIT` runs the configured contract against the real table: whatever the gate accepts, the table must accept (otherwise a "repaired" event would fail downstream again), and the `status` and `currency` rules must match the table's CHECK constraints exactly. The gate may be stricter than the table (identifier characters, two decimal places, no future dates), which only costs an extra human review. It replaces the old comment "keep these in sync".
 
-**A new topic needs no new Java for the contract and the gate.** `SecondContractRepairTest` runs a test-only `shipments` contract (an integer, an enum and a plain date) through the real repair agent, patch applier and gate with no shipment-specific code. Replaying to a second topic is a separate limit: the replay guard still allows only `topics.main`.
+**A new topic needs no new Java for the contract and the gate.** `SecondContractRepairTest` runs a test-only `shipments` contract (an integer, an enum and a plain date) through the real repair agent, patch applier and gate with no shipment-specific code. Several live topics are the streams below.
 
 1. **Parse.** The payload must be a JSON object (strict: no duplicate keys, no trailing text). Otherwise the model is never called.
 2. **Ask the repair model**, with the adapter's contract in the system prompt and two read-only tools attached (`ContractTools`):
@@ -185,14 +214,14 @@ What stays hand-written, on purpose, is the small policy (identity fields, key f
 Edge cases deliberately handled:
 - **Hard violation:** quarantined as `SCHEMA_DRIFT` (`PENDING_REVIEW`) with the violations as the reason, and nothing is replayed.
 - **Repair loop:** an agent-repaired event that fails again goes straight to quarantine, without planning or repair.
-- **Spoofed topic:** replay only targets `orders-topic`; any other `original-topic` header value is quarantined.
+- **Spoofed topic:** replay only targets the stream's own source topic; any other `original-topic` header value is quarantined, including another stream's topic.
 - **No-op patch:** if the proposal changes nothing, the failure is not a payload problem and it is quarantined.
 - **Broker down during replay:** the error propagates, the offset is not committed and the listener retries.
 
 Known limitations:
 - Replay is **at-least-once**. If the process dies after the broker acknowledges the replay but before the DLQ offset is committed, the event is replayed twice. The downstream consumer must be idempotent (`orders.order_id` is the primary key).
 - A rename repair (old field dropped, new field set) is checked for structure, but the gate cannot prove the renamed field's *value* is the right one. That is why renames are risk-flagged and need a human.
-- `JdbcSchemaInspector` (infrastructure) still hard-codes the `orders` allow-list. It is deliberate defense in depth, but it means a second topic that needs schema inspection requires a change there. Decoupling it would either weaken that check or introduce circular wiring.
+- `JdbcSchemaInspector` (infrastructure) enforces the union of every stream's configured `tables` as defense in depth, on top of each stream's own narrower list. Adding a stream that needs a new table means listing it in that stream's config.
 - Only the adapter's editable fields can be repaired (for orders, four). A wrong `customerId` is always a human decision.
 - The `orders` table exists as the schema reference for the tools; this service does not write to it. Applying events is the job of the main consumer.
 
@@ -367,7 +396,8 @@ Four layers, with dependencies pointing inward:
 | Agent | `agent` | Generic engine: triage orchestration, planner, repair agent, adapter registry, patch applier. Knows nothing about any specific topic. |
 | Contract | `contract` | `SchemaContract` (JSON Schema + policy), `ChangeRules` (generic meaning-preservation rules), `SchemaDrivenTopicAdapter`, `ContractTools`. Nothing in it knows about orders. A new topic is a schema file plus configuration. |
 | JSON | `json` | `StrictJson`: the one strict parsing dialect for untrusted payloads. |
-| Messaging | `messaging` | DLQ listener, header and correlation-ID handling, replay publisher. |
+| Stream | `stream` | `HealingStream` (one DLQ, its source topic, contract, tier policy, retry budget and circuit breaker) and `StreamRegistry`, which builds and validates every configured stream at start-up. |
+| Messaging | `messaging` | One listener container per stream, header and correlation-ID handling, replay publisher. |
 | Infrastructure | `infrastructure` | Kafka and Postgres config, typed properties, JDBC adapters (quarantine, schema inspector). |
 
 The planner's output is a sealed `RemediationPlan` (`SchemaRepair | TransientRetry | Quarantine`), so a Java 21 `switch` over it is exhaustive and the compiler flags any handler missing a new strategy. Listeners run on virtual threads (`spring.threads.virtual.enabled=true`).
@@ -380,7 +410,7 @@ The LLM only proposes. It never executes.
 2. **Typed output.** The plan must parse into a `RemediationPlan` record. Anything else is quarantined.
 3. **Deterministic gate.** The Evaluator Gate (the contract's schema, identity fields, key, number preservation, plus risk flags for assumptions) is plain Java outside the LLM, derived from the topic's schema and policy. Nothing is replayed without passing its hard checks.
 4. **Structurally limited edits.** The model returns edits to schema-derived scalar fields, never a payload. Identity fields (declared in the policy, which the model cannot change) are not representable in an edit.
-5. **Closed loops and targets.** Replays go only to the configured main topic, and an agent-repaired event that fails again is quarantined, never re-repaired.
+5. **Closed loops and targets.** Replays go only to the stream's own configured source topic, and an agent-repaired event that fails again is quarantined, never re-repaired.
 6. **Human in the loop for assumptions.** A repair with any risk flag, or with confidence below the threshold, is never auto-replayed. Confidence can only demote, never promote.
 7. **Authenticated approvals.** Approving publishes to a production topic, so the approval API requires credentials, re-validates the proposal, locks the row, and records the reviewer.
 8. **Bounded.** Edit-count, value-length and confidence limits, plus fail-closed handling everywhere, route doubtful cases to quarantine.
@@ -436,7 +466,9 @@ dlq-healing-agent/
 │   │   ├── ChangeRules               generic: a repair changes the representation of a value, never its meaning
 │   │   ├── SchemaDrivenTopicAdapter  implements TopicAdapter from a SchemaContract (prompt, editable fields, gate)
 │   │   ├── ContractTools             the two read-only @Tool methods, for any topic
-│   │   └── ContractConfiguration     builds the main topic's adapter from dlqagent.contract
+│   ├── stream/                       Phase 7c: several DLQs
+│   │   ├── HealingStream             one DLQ + its source topic, contract, tier policy, retry budget, own breaker
+│   │   └── StreamRegistry            builds and validates every dlqagent.streams entry at start-up
 │   ├── retry/                        Strategy B
 │   │   ├── RetryScheduler            deterministic: first / later / exhausted, by content fingerprint
 │   │   ├── RetryPoller               claims due rows (SKIP LOCKED), asks the breaker, replays unchanged
@@ -451,7 +483,7 @@ dlq-healing-agent/
 │   │   └── ApprovalView, exception handler, small exceptions
 │   ├── json/                         StrictJson (strict parsing), JsonDiff / FieldChange (field-level diff)
 │   ├── messaging/
-│   │   ├── DlqListener               @KafkaListener on the DLQ, MDC, manual ack
+│   │   ├── StreamListeners           one listener container and consumer group per stream, MDC, manual ack
 │   │   ├── FailureContextFactory     ConsumerRecord → FailureContext
 │   │   ├── KafkaEventReplayer        replay to orders-topic with audit headers
 │   │   └── DlqHeaders                header name constants
@@ -545,7 +577,7 @@ mvn verify        # unit tests (*Test) in `test`, Testcontainers tests (*IT) in 
 
 Docker must be running. Tests start their own Kafka and PostgreSQL containers; they never touch the containers that `docker-compose` runs and never call a real LLM (the API key is a dummy value). The **image versions are read from `docker-compose.yml`** (`ComposeImages`), so there is one place to change a version, local development and the tests cannot drift apart, and a Dependabot bump of a compose image is exercised by the full test suite on its own pull request.
 
-Current coverage (165 unit and 46 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
+Current coverage (184 unit and 51 integration tests passing, SpotBugs clean; 6 live-LLM tests skipped by default):
 - `InfrastructureSmokeIT`: Flyway creates both tables, both topics exist, configuration binds.
 - `QuarantineFlowIT`: a corrupt event published to `orders-dlq` (with correlation ID, original-topic and stack-trace headers) appears in `quarantine_event` with all metadata; saving the same record twice writes one row; a NUL-containing payload is sanitized and stored.
 - `SpringAiRemediationPlannerTest` (13 tests, scripted `ChatModel`): each strategy maps correctly; low, out-of-range and threshold-boundary confidence; unknown strategy, non-JSON and missing fields; model exceptions; JSON braces in the payload do not break the template; prompt contents, truncation and fencing; a prompt-injection payload stays inside the data fence.
@@ -558,12 +590,14 @@ Current coverage (165 unit and 46 integration tests passing, SpotBugs clean; 6 l
 - `PatchApplierTest` (engine only, mocked adapter) and `SchemaRepairAgentTest`: whitelist and bounds, identity fields unreachable, hallucinated amount and guessed date stopped by the gate, declined, empty and garbage proposals, model errors, non-JSON payloads and topics without an adapter never reach the model, the adapter's contract is sent per request.
 - `TopicAdapterRegistryTest`: lookup by topic, duplicate adapters fail fast.
 - `JdbcSchemaInspectorIT`: reads the real catalog; refuses non-allow-listed tables, injection strings and `pg_catalog`.
-- `DlqTriageServiceTest` (24 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B (scheduled, exhausted, redelivery, spoofed topic, scheduler failure propagates).
+- `DlqTriageServiceTest` (27 tests, including audit content for every outcome and no audit when a replay fails): the tier policy (clean and confident goes to Tier 1, any flag goes to Tier 2 even at confidence 1.0, the lower of planner and repair confidence decides, the threshold is inclusive), unrepairable, repairer errors, replay failures propagate, spoofed topic, loop guard, planner errors, Strategy B (scheduled, exhausted, redelivery, spoofed topic, scheduler failure propagates), and the per-stream tier policy (auto-replay switched off, a stream's own threshold, the stream recorded on the held record and audit row).
+- `StreamRegistryTest` (11 tests): duplicate stream names, DLQ topics, source topics or consumer groups stop startup; a topic cannot be both a DLQ and a source; stream names are restricted to a harmless alphabet; the consumer group defaults to one per stream; every stream gets its own adapter, contract and breaker; per-stream overrides fall back to the global defaults; a broken stream (a policy naming a missing field, a missing schema file) stops startup and names itself. `RetryPollerTest` also covers one stream's open breaker not holding back another's retries.
+- `MultiStreamIT` (5 tests, real Kafka and Postgres, scripted model, two streams): each stream is repaired by its own contract and replayed to its own topic with nothing crossing over; a header naming another stream's topic is quarantined and replayed nowhere; a missing header defaults to the stream's own source topic; an open breaker in one stream does not hold back the other's retries (and the canary closes it again); approvals can be listed per stream and an approved fix goes to its own stream's topic. **Negative control:** removing the source-topic check and making the poller use one shared breaker made exactly these two tests fail. Every other integration test now also runs with both streams configured.
 - Hardening tests: `QuarantineFlowIT` sends a 300-character key, a 100-character correlation id and a 300-character original-topic header and requires a quarantine row (not a stalled partition); `ApprovalFlowIT` proves form, `text/plain` and body-less POSTs to approve and reject are refused with 415 or 400 and change nothing; `LogSafeTest`, `FailureContextFactoryTest` (which correlation ids are trusted), `OrdersContractTest` (Unicode look-alikes) and an immutability test for the records.
 - `CompressionCodecsIT` (5 tests): sends a compressible record through the real broker with each Kafka codec (gzip, snappy, lz4, zstd) and reads it back, and checks from the build's SBOM that snappy-java and lz4-java have not dropped below their security minimums. It exists because those codec libraries are transitive dependencies that nothing else in the suite touches (the app does not compress its own records) yet they receive security upgrades and Dependabot bumps; without it a green build says nothing about whether such an upgrade still works. It also gave the snappy-java upgrade its first real runtime check.
 - `RecordingToolCallbackTest`: records name, success and duration, rethrows failures unchanged, never keeps arguments or results.
 - `AuditFlowIT` (10 tests, real Kafka, Postgres and OpenTelemetry spans): audit rows for Tier 1, poison pills, Tier 2 and both human decisions (including the same `event_id` across stages and the `/api/audit` view); the table rejects `UPDATE` and `DELETE`; NUL characters in audit content are sanitized; recording twice writes one row; **a failing audit write rolls the quarantine row back**; and one trace links the Kafka consume, plan, repair, both Spring AI chat-client spans, the replay and the audit row's `trace_id`.
-- `ApprovalServiceTest` and `JsonDiffTest`: only pending approvals can be decided, approve re-runs the hard checks, a failed replay leaves the item pending, reject never replays, limit clamping, field-level diff.
+- `ApprovalServiceTest` (10 tests) and `JsonDiffTest`: only pending approvals can be decided, an event of a stream that is no longer configured, or whose topic the stream no longer serves, cannot be approved, approve re-runs the hard checks, a failed replay leaves the item pending, reject never replays, limit clamping, field-level diff.
 - `ApprovalFlowIT` (9 tests, real Kafka, Postgres and Spring Security): a risky repair is stored and not replayed; 401 for missing or wrong credentials; everything but health and the approval API is denied; the reviewer sees the diff; approve replays with `x-approved-by`, the correlation ID and the original headers and cannot be repeated; reject needs a note and never replays; a tampered proposal is refused with 409; unknown ids give 404; two simultaneous approvals replay exactly once.
 - `FailureContextFactoryTest`: header extraction, generated correlation ID, topic default, tombstones, stable event ID.
 
@@ -601,6 +635,8 @@ The Jaeger check also confirmed the exporter wiring: the four audit rows' `trace
 
 **Fourth real run: schema-driven Strategy A (2026-11-01).** Real OpenAI `gpt-4o-mini`, Kafka 4.3.1 and a throwaway Postgres 16, after Phase 7b replaced the hand-written order rules, with the schema and the generated prompt now driving the gate. Five events with a hand-written constraint-violation stack trace: **3 of 3 text-amount events** (`"21.50 USD"`, `"22.50 USD"`, `"23.50 USD"`) were repaired and replayed automatically (Tier 1) to `orders-topic` with the correct numeric amounts (21.50, 22.50, 23.50) and the audit headers; the truncated JSON event was quarantined with the model's rationale; the ambiguous `03/04/2025` date was held for a human (Tier 2) with the gate's flag. Two re-runs of the live evaluation (`LivePlannerEvalIT`) passed 6/6. The application log had no warnings or errors. Observations and caveats: (1) **the model made no tool calls** in these five repairs, nor in the live evaluation's repair scenario, where before it made 2 to 3; with the whole schema in the prompt it often does not ask for the tools (in a later single ambiguous-date run it did call both). The tools are attached (a unit test checks the request options) and a one-off probe showed the real model calls `validatePayload` when told to, so this is the model's choice; (2) repair confidence was again exactly `0.90`, the threshold, so it still works by alignment, not calibration; (3) this is a handful of events, not an accuracy measure, and the stack traces were written by hand.
 
+**Fifth real run: two streams (2026-11-04).** Real OpenAI `gpt-4o-mini`, Kafka 4.3.1 and a throwaway Postgres 16, one process healing an `orders` stream and a `shipments` stream (the test-only shipments contract, loaded with a `file:` schema location), `retry.max-attempts` lowered to 3. Six events with hand-written stack traces, three of them to `shipments-dlq`. Observed: the orders text amount (`"21.50 USD"`) and the shipments text quantity (`"3 units"`) were each repaired by their own contract and replayed automatically (Tier 1) to their own topic with the correct values; a shipments event whose `original-topic` header claimed `orders-topic` was quarantined ("Refusing to replay to unexpected topic 'orders-topic'") and replayed nowhere; a shipments `ConnectException` was scheduled and replayed unchanged to `shipments-topic` with `x-retry-attempt: 1`; an ambiguous orders date was held for a human, and `?stream=orders` listed it while `?stream=shipments` listed nothing; the model itself declined an ambiguous shipments date, so that one was quarantined, not held; approving the orders item replayed it to `orders-topic` with `x-approved-by`. Nothing appeared on the wrong topic, the audit log split 3 orders rows to 5 shipments rows by stream, each stream logged its own consumer group at startup, and the application log had no warnings or errors. Caveats: six events, one run, hand-written stack traces; the circuit breaker did not trip, so the per-stream breakers are covered only by the automated tests; the shipments contract is a test fixture, not a real second topic.
+
 **What this does and does not show.**
 - It is a smoke-level check: one scenario per category, 6 in total. It shows that the prompts, structured-output parsing, tool wiring and gate work together with a real model. It is **not** an accuracy measurement, and it says nothing about messier real-world payloads or about other models.
 - The negative scenarios (garbage payload, ambiguous date, missing `customerId`) assert that the model or the gate *decided* to reject or hold the event (for the ambiguous date, either a decline or a repair carrying an `ambiguous` risk flag is accepted, since both are safe). They fail if the outcome was caused by an error. This guard exists because the first live run was wrong: a test-harness bug sent a dummy API key, every call returned 401, and the three negative scenarios "passed" only because the system fails closed on errors. The fix is in `AbstractIntegrationTest` (real key used when `DLQ_LIVE_LLM=true`) plus the `assertDecidedByTheModel` check.
@@ -627,8 +663,12 @@ Application settings (`dlqagent.*`, validated at startup):
 
 | Property | Default | Meaning |
 |---|---|---|
-| `topics.main` / `topics.dlq` | `orders-topic` / `orders-dlq` | Topic names |
-| `topics.partitions` | `3` | Partitions for declared topics |
+| `topics.partitions` / `topics.declare` | `3` / `true` | Partitions for topics this service declares itself, and whether it declares them (local and tests only) |
+| `streams[].name` | none | Required, `[a-z0-9-]`, up to 63 characters. Recorded on every held event, retry and audit row |
+| `streams[].dlq-topic` / `source-topic` | none | One DLQ and the only topic it may replay to. Both required, all unique across streams |
+| `streams[].group-id` | `dlq-healing-agent-<name>` | Consumer group. Keep an existing stream's id |
+| `streams[].auto-replay` | `true` | `false`: every repair of this stream waits for a human |
+| `streams[].auto-replay-min-confidence` / `max-attempts` | gate / retry defaults | Per-stream overrides |
 | `retry.max-attempts` | `5` | Strategy B: replays per event before it is quarantined |
 | `retry.initial-delay` / `multiplier` / `max-delay` | `2s` / `2.0` / `5m` | Backoff curve |
 | `retry.poll-interval` / `batch-size` | `5s` / `10` | How often due retries are looked for, and the most replays per wake-up (bounds the replay rate) |
@@ -637,10 +677,11 @@ Application settings (`dlqagent.*`, validated at startup):
 | `planner.min-confidence` | `0.7` | Below this, the event is quarantined |
 | `planner.max-payload-chars` | `4000` | Payload (and headers) sent to the model are truncated beyond this |
 | `planner.max-stack-trace-chars` | `2000` | Stack trace sent to the model is truncated beyond this |
-| `contract.schema` | `classpath:contracts/orders.schema.json` | JSON Schema of the main topic's events: the single source of truth for shape |
-| `contract.identity-fields` | `[orderId, customerId]` | Never edited or dropped by the agent; must be unchanged in a repair |
-| `contract.key-field` | `orderId` | Must equal the Kafka key |
-| `contract.no-future-fields` | `[createdAt]` | Timestamps the schema cannot bound; later than now plus 5 minutes is a hard violation |
+| `streams[].contract.schema` | none (orders: `classpath:contracts/orders.schema.json`) | JSON Schema of the stream's events: the single source of truth for shape |
+| `streams[].contract.identity-fields` | none (orders: `[orderId, customerId]`) | Never edited or dropped by the agent; must be unchanged in a repair |
+| `streams[].contract.key-field` | none (orders: `orderId`) | Must equal the Kafka key |
+| `streams[].contract.tables` | none | Tables the model may describe with its read-only tool for this stream |
+| `streams[].contract.no-future-fields` | none (orders: `[createdAt]`) | Timestamps the schema cannot bound; later than now plus 5 minutes is a hard violation |
 | `gate.auto-replay-min-confidence` | `0.9` | Tier 1 needs the repair's confidence at or above this; below it a repair waits for a human |
 
 ## Switching the LLM provider
@@ -661,17 +702,17 @@ Each also needs its own properties (API key, model name, or Ollama base URL). Th
 
 Managed by Flyway (`src/main/resources/db/migration`).
 
-**`quarantine_event`** (written today): events held for a human. Stores correlation ID, original topic, key, payload, headers (JSONB), stack trace, strategy and reason. `status` is one of:
+**`quarantine_event`** (written today): events held for a human. Stores correlation ID, original topic, key, payload, headers (JSONB), stack trace, strategy and reason. `status` is one of (V8 added a `stream` column to this table):
 - `PENDING_REVIEW`: quarantined (poison pill, hard violation, or a failure); no proposal exists.
 - `PENDING_HUMAN_APPROVAL`: Tier 2. `proposed_payload`, `repair_summary` and `risk_flags` (JSONB) are filled in; a CHECK constraint guarantees a pending approval always has a proposal.
 - `APPROVED_REPLAYED` / `REJECTED`: the human decision, with `reviewed_by`, `reviewed_at` and `review_notes`.
 - `RESOLVED` / `DISCARDED`: reserved for manual handling of plain quarantines (no code sets these yet).
 
-**`dlq_audit_log`**: the append-only audit trail described above (V5). Indexed by correlation ID and event ID; `UPDATE` and `DELETE` are blocked by a trigger.
+**`dlq_audit_log`**: the append-only audit trail described above (V5; V8 added `stream`). Indexed by correlation ID and event ID; `UPDATE` and `DELETE` are blocked by a trigger.
 
 **`orders`**: reference schema for the order domain, read by the `describeTable` tool (never written by this service). Its CHECK constraints are the consumer's contract; `OrdersContractDriftIT` fails if `contracts/orders.schema.json` accepts something the table rejects.
 
-**`retry_schedule`** (V2, used since V7): durable Strategy B retries. Stores the event, a unique content `fingerprint`, `attempt` (replays already sent), `next_attempt_at`, `last_event_id` (the DLQ record that last scheduled it, so a redelivered record is not counted as a new failure) and a `status`: `SCHEDULED`, `REPLAYED` (sent; nothing has come back yet) or `EXHAUSTED`. There is no in-flight state: a row is claimed and replayed in one transaction. Postgres-backed rather than in-memory so the attempt budget survives restarts.
+**`retry_schedule`** (V2, used since V7; V8 added `stream`): durable Strategy B retries. Stores the event, a unique content `fingerprint`, `attempt` (replays already sent), `next_attempt_at`, `last_event_id` (the DLQ record that last scheduled it, so a redelivered record is not counted as a new failure) and a `status`: `SCHEDULED`, `REPLAYED` (sent; nothing has come back yet) or `EXHAUSTED`. There is no in-flight state: a row is claimed and replayed in one transaction. Postgres-backed rather than in-memory so the attempt budget survives restarts.
 
 ## Roadmap
 
@@ -686,6 +727,7 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 6 | `dlq_audit_log` (diffs, rationale, tool-call summaries, tier decision, outcome; append-only), `/api/audit`, Micrometer tracing with OTLP export | ✅ Done |
 | 7 | Strategy B: durable backoff schedule and poller, unchanged replay, content-fingerprint attempt budget, outcome-based circuit breaker. Tested end to end with a scripted model, and run once with the real model on the real stack. A health-check tool was designed out (see [Strategy B](#strategy-b-transient-retry)) | ✅ Done |
 | 7b | **Schema-driven Strategy A.** Contract as one JSON Schema plus a small policy; editable fields, prompt, validation tool and gate derived from it; the hand-written order validator and allowlist deleted after a differential run; drift test against the real table; a second contract proves no new Java is needed. Behaviour-preserving for orders, with one documented difference. Not built: a schema registry source, and widening Tier 1 (that waits for the Phase 8 eval) | ✅ Done |
+| 7c | **Several DLQs as independent streams.** `dlqagent.streams`: one DLQ and one source topic per stream, each with its own contract, tier policy, retry budget, circuit breaker, listener container and consumer group; validated at start-up; the stream recorded on every held event, retry and audit row; approvals filterable by stream. Tested with two streams end to end, and run once on the real stack with the real model. Not built: a shared DLQ for several source topics (deliberately), per-stream reviewer roles, a per-stream prompt hint | ✅ Done |
 | 8 | End-to-end suite covering all strategies and tiers, a larger labelled live evaluation set, final docs | Planned |
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
 | 11 (idea) | **Optional active probes for Strategy B.** Today the breaker only watches whether replayed events come back. An active probe could stop retries earlier. It would be *discovered, not listed*: read from a service registry or catalog (for example an actuator health URL each owning team publishes), so it stays current as services change. The model may propose which dependency looks involved from the stack trace; deterministic code accepts it only if it exists in the registry (the same propose-then-validate pattern as Strategy A), and an unmapped dependency fails closed with an audit entry and a metric so the gap is visible. The probe target must never come from the stack trace itself (SSRF). Needs a real registry to build and test honestly | Backlog |
