@@ -1,0 +1,21 @@
+# Integration tests run two streams, so every test also exercises the multi-stream wiring. A list in a profile file
+# replaces the application.yml list as a whole, so the orders stream is repeated here.
+dlqagent:
+  streams:
+    - name: orders
+      dlq-topic: orders-dlq
+      source-topic: orders-topic
+      group-id: dlq-healing-agent
+      contract:
+        schema: classpath:contracts/orders.schema.json
+        identity-fields: [orderId, customerId]
+        key-field: orderId
+        no-future-fields: [createdAt]
+        tables: [orders]
+    - name: shipments
+      dlq-topic: shipments-dlq
+      source-topic: shipments-topic
+      contract:
+        schema: classpath:contracts/shipments.schema.json
+        identity-fields: [shipmentId, orderRef]
+        key-field: shipmentId

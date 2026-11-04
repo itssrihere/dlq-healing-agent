@@ -49,4 +49,21 @@ class ContractToolsTest {
 
         assertThat(tools.describeTable("orders")).isSameAs(schema);
     }
+
+    @Test
+    void aTableOutsideThisTopicsListIsRefusedBeforeTheInspectorIsAsked() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> tools.describeTable("shipments"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("not allowed for this topic");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> tools.describeTable("pg_catalog.pg_user"))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.mockito.Mockito.verifyNoInteractions(inspector);
+    }
+
+    @Test
+    void tableNamesAreMatchedWithoutRegardToCaseOrPadding() {
+        var schema = new SchemaInspector.TableSchema("orders", List.of(), List.of());
+        when(inspector.describe("orders")).thenReturn(schema);
+
+        assertThat(tools.describeTable("  ORDERS ")).isSameAs(schema);
+    }
 }

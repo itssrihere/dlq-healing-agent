@@ -17,6 +17,10 @@ public final class MainTopicReader {
 
     /** Polls until a record with the key shows up or the time is up; returns what was found (empty if none). */
     public static List<ConsumerRecord<String, String>> read(String bootstrapServers, String key, Duration atMost) {
+        return read(bootstrapServers, "orders-topic", key, atMost);
+    }
+
+    public static List<ConsumerRecord<String, String>> read(String bootstrapServers, String topic, String key, Duration atMost) {
         var props = Map.<String, Object>of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
                 ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID(),
@@ -25,7 +29,7 @@ public final class MainTopicReader {
                 ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         List<ConsumerRecord<String, String>> found = new ArrayList<>();
         try (var consumer = new KafkaConsumer<String, String>(props)) {
-            consumer.subscribe(List.of("orders-topic"));
+            consumer.subscribe(List.of(topic));
             long deadline = System.nanoTime() + atMost.toNanos();
             while (System.nanoTime() < deadline && found.isEmpty()) {
                 consumer.poll(Duration.ofMillis(500)).forEach(r -> {
@@ -38,6 +42,10 @@ public final class MainTopicReader {
 
     /** Reads for the whole period and returns every record with the key: for asserting that nothing was sent twice. */
     public static List<ConsumerRecord<String, String>> readAll(String bootstrapServers, String key, Duration period) {
+        return readAll(bootstrapServers, "orders-topic", key, period);
+    }
+
+    public static List<ConsumerRecord<String, String>> readAll(String bootstrapServers, String topic, String key, Duration period) {
         var props = Map.<String, Object>of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
                 ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID(),
@@ -46,7 +54,7 @@ public final class MainTopicReader {
                 ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         List<ConsumerRecord<String, String>> found = new ArrayList<>();
         try (var consumer = new KafkaConsumer<String, String>(props)) {
-            consumer.subscribe(List.of("orders-topic"));
+            consumer.subscribe(List.of(topic));
             long deadline = System.nanoTime() + period.toNanos();
             while (System.nanoTime() < deadline) {
                 consumer.poll(Duration.ofMillis(300)).forEach(r -> {

@@ -240,6 +240,44 @@ class DlqTriageServiceTest {
         verifyNoInteractions(planner, repairer, replayer);
     }
 
+    // ---- per-stream tier policy ---------------------------------------------------------------------------------
+
+    private HealingStream streamWith(boolean autoReplay, double threshold) {
+        return new HealingStream("orders", "orders-dlq", "orders-topic", "g", TestStreams.orders().adapter(),
+                autoReplay, threshold, 5, TestStreams.orders().breaker());
+    }
+
+    @Test
+    void aStreamWithAutoReplaySwitchedOffHoldsEvenAPerfectRepairForAHuman() {
+        var repaired = repaired(1.0);
+        planRepair(0.95, repaired);
+
+        service.triage(streamWith(false, 0.9), ctx);
+
+        verify(replayer, never()).replay(any());
+        assertThat(saved().status()).isEqualTo(QuarantineStatus.PENDING_HUMAN_APPROVAL);
+        assertThat(saved().reason()).contains("auto-replay is switched off for stream 'orders'");
+    }
+
+    @Test
+    void aStreamsOwnConfidenceThresholdDecidesTheTier() {
+        planRepair(0.95, repaired(0.8));
+
+        service.triage(streamWith(true, 0.7), ctx); // 0.8 clears this stream's 0.7
+
+        verify(replayer).replay(any());
+    }
+
+    @Test
+    void theEventsStreamIsRecordedOnTheHeldRecordAndTheAuditRow() {
+        when(planner.plan(ctx)).thenReturn(new RemediationPlan.Quarantine("corrupt"));
+
+        service.triage(stream, ctx);
+
+        assertThat(saved().stream()).isEqualTo("orders");
+        assertThat(audited().stream()).isEqualTo("orders");
+    }
+
     // ---- Strategy B ---------------------------------------------------------------------------------------
 
     @Test

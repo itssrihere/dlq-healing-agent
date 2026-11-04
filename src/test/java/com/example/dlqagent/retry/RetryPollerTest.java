@@ -17,6 +17,7 @@ import com.example.dlqagent.domain.RetryEntry;
 import com.example.dlqagent.domain.RetryScheduleRepository;
 import com.example.dlqagent.domain.RetryStatus;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.stream.HealingStream;
 import com.example.dlqagent.stream.StreamRegistry;
 import com.example.dlqagent.support.TestProps;
 import com.example.dlqagent.support.TestStreams;
@@ -126,5 +127,40 @@ class RetryPollerTest {
         when(breaker.tryAcquire()).thenReturn(true);
 
         assertThat(poller.pollOnce()).isEqualTo(10); // retry.batch-size
+    }
+
+    @Test
+    void oneStreamsOpenBreakerDoesNotHoldBackAnotherStreamsRetries() {
+        ReplayCircuitBreaker shipmentsBreaker = mock(ReplayCircuitBreaker.class);
+        var shipments = new HealingStream("shipments", "shipments-dlq", "shipments-topic", "g",
+                TestStreams.orders().adapter(), true, 0.9, 5, shipmentsBreaker);
+        when(streams.all()).thenReturn(List.of(TestStreams.orders(breaker), shipments));
+        RetryEntry ordersRow = due(0);
+        RetryEntry shipmentsRow = new RetryEntry(UUID.randomUUID(), "shipments", "f2", "cid2", "shipments-topic", "s-1",
+                "{\"a\":2}", Map.of(), 0, clock.instant(), RetryStatus.SCHEDULED, UUID.randomUUID(), "conn reset");
+        when(repo.lockNextDue(any(), org.mockito.ArgumentMatchers.eq("orders"), any())).thenReturn(Optional.of(ordersRow));
+        when(repo.lockNextDue(any(), org.mockito.ArgumentMatchers.eq("shipments"), any()))
+                .thenReturn(Optional.of(shipmentsRow), Optional.empty());
+        when(breaker.tryAcquire()).thenReturn(false); // orders: open
+        when(shipmentsBreaker.tryAcquire()).thenReturn(true);
+
+        assertThat(poller.pollOnce()).isEqualTo(1);
+
+        ArgumentCaptor<ReplayRequest> sent = ArgumentCaptor.forClass(ReplayRequest.class);
+        verify(replayer).replay(sent.capture());
+        assertThat(sent.getValue().topic()).isEqualTo("shipments-topic");
+        // asked once to find the row and once more to learn the stream's batch was done
+        verify(repo, org.mockito.Mockito.atLeastOnce()).lockNextDue(any(), org.mockito.ArgumentMatchers.eq("shipments"),
+                org.mockito.ArgumentMatchers.eq("shipments-topic"));
+    }
+
+    @Test
+    void eachStreamIsAskedForRowsAimedAtItsOwnSourceTopicOnly() {
+        when(repo.lockNextDue(any(), any(), any())).thenReturn(Optional.empty());
+
+        poller.pollOnce();
+
+        verify(repo).lockNextDue(any(), org.mockito.ArgumentMatchers.eq("orders"),
+                org.mockito.ArgumentMatchers.eq("orders-topic"));
     }
 }
