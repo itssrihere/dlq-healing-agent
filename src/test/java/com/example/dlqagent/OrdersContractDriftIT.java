@@ -2,7 +2,7 @@ package com.example.dlqagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.example.dlqagent.contract.SchemaDrivenTopicAdapter;
+import com.example.dlqagent.stream.StreamRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
@@ -41,9 +41,13 @@ class OrdersContractDriftIT extends AbstractIntegrationTest {
             "\"2025-02-30T10:00:00Z\"", "\"2025-04-03T23:59:60Z\"", "\"2025-04-03T10:00:00+0200\"", "\"2025-04-03T10:00:00.1234567Z\"",
             "0", "-1", "19.99", "19.995", "20", "1e10", "9999999999.99", "0.01", "0.001", "1E+2", "123456789012");
 
-    @Autowired SchemaDrivenTopicAdapter gate;
+    @Autowired StreamRegistry streams;
     @Autowired JdbcClient jdbc;
     @Autowired TransactionTemplate tx;
+
+    private com.example.dlqagent.domain.TopicAdapter gate() {
+        return streams.byName("orders").orElseThrow().adapter();
+    }
 
     private static ObjectNode with(String field, String valueJson) throws Exception {
         ObjectNode n = (ObjectNode) JSON.readTree(BASE);
@@ -86,7 +90,7 @@ class OrdersContractDriftIT extends AbstractIntegrationTest {
         for (String f : FIELDS) {
             for (String v : VALUES) {
                 ObjectNode order = with(f, v);
-                if (gate.validate(order.toString()).isEmpty()) {
+                if (gate().validate(order.toString()).isEmpty()) {
                     accepted++;
                     if (!tableAccepts(order)) {
                         unsound.add(order.toString());
@@ -108,7 +112,7 @@ class OrdersContractDriftIT extends AbstractIntegrationTest {
                     continue;
                 }
                 // judge only this field: other fields are the valid base, so any difference comes from f
-                boolean gateAccepts = gate.validate(order.toString()).isEmpty();
+                boolean gateAccepts = gate().validate(order.toString()).isEmpty();
                 boolean tableAccepts = tableAccepts(order);
                 if (gateAccepts != tableAccepts) {
                     mismatches.add(f + "=" + v + " gate=" + gateAccepts + " table=" + tableAccepts);
@@ -123,7 +127,7 @@ class OrdersContractDriftIT extends AbstractIntegrationTest {
         // amount > 0 and NUMERIC(12,2): the gate must refuse exactly what the table's range or CHECK would refuse
         for (String v : List.of("0", "-1", "0.01", "9999999999.99", "1e10", "123456789012")) {
             ObjectNode order = with("amount", v);
-            boolean gateAccepts = gate.validate(order.toString()).isEmpty();
+            boolean gateAccepts = gate().validate(order.toString()).isEmpty();
             assertThat(gateAccepts).as("amount %s: gate vs table", v).isEqualTo(tableAccepts(order));
         }
     }

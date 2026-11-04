@@ -11,19 +11,21 @@ import org.springframework.stereotype.Component;
 @Component
 class JdbcSchemaInspector implements SchemaInspector {
 
-    private static final Set<String> ALLOWED_TABLES = Set.of("orders");
-
+    private final Set<String> allowedTables;
     private final JdbcClient jdbc;
 
-    JdbcSchemaInspector(JdbcClient jdbc) {
+    /** Defense in depth: the union of every stream's tables. Each stream's tool applies its own, narrower list first. */
+    JdbcSchemaInspector(JdbcClient jdbc, DlqAgentProperties props) {
         this.jdbc = jdbc;
+        this.allowedTables = props.streams().stream().flatMap(s -> s.contract().tables().stream())
+                .map(t -> t.trim().toLowerCase(Locale.ROOT)).collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     @Override
     public TableSchema describe(String table) {
         String name = table == null ? "" : table.trim().toLowerCase(Locale.ROOT);
-        if (!ALLOWED_TABLES.contains(name)) {
-            throw new IllegalArgumentException("Table not allowed: '" + table + "'. Allowed: " + ALLOWED_TABLES);
+        if (!allowedTables.contains(name)) {
+            throw new IllegalArgumentException("Table not allowed: '" + table + "'. Allowed: " + allowedTables);
         }
         List<Column> columns = jdbc.sql("""
                 SELECT column_name, data_type, is_nullable, character_maximum_length,

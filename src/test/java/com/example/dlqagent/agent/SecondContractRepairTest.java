@@ -46,7 +46,7 @@ class SecondContractRepairTest {
             return new SchemaDrivenTopicAdapter(TOPIC,
                     new SchemaContract(schema, new ContractPolicy(Set.of("shipmentId", "orderRef"), "shipmentId", Set.of()),
                             OrdersContract.CLOCK),
-                    mock(SchemaInspector.class));
+                    mock(SchemaInspector.class), Set.of());
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
@@ -55,7 +55,7 @@ class SecondContractRepairTest {
     private RepairResult repair(String payload, String edits) {
         model.respondWith(p -> "{\"repairable\":true,\"confidence\":0.95,\"summary\":\"fix\",\"edits\":%s,\"dropFields\":[]}"
                 .formatted(edits));
-        return agent.repair(new FailureContext("cid", "shipments-dlq", 0, 1L, TOPIC, "S-000123", payload, Map.of(),
+        return agent.repair(new FailureContext("orders", "cid", "shipments-dlq", 0, 1L, TOPIC, "S-000123", payload, Map.of(),
                 "ConstraintViolation: quantity", Instant.now()));
     }
 

@@ -13,8 +13,12 @@ public interface RetryScheduleRepository {
     /** Locking. */
     Optional<RetryEntry> lockByFingerprint(String fingerprint);
 
-    /** Locking: the most overdue SCHEDULED row, skipping rows another transaction holds. */
-    Optional<RetryEntry> lockNextDue(Instant now);
+    /**
+     * Locking: the most overdue SCHEDULED row of one stream, skipping rows another transaction holds. Only rows
+     * aimed at the stream's current source topic qualify, so a row left over from before a topic was renamed is
+     * never replayed to the wrong place.
+     */
+    Optional<RetryEntry> lockNextDue(Instant now, String stream, String sourceTopic);
 
     void reschedule(UUID id, Instant nextAttemptAt, UUID lastEventId, String lastError);
 

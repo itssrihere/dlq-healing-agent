@@ -15,6 +15,7 @@ import java.util.UUID;
  */
 public record RetryEntry(
         UUID id,
+        String stream,
         String fingerprint,
         String correlationId,
         String targetTopic,
@@ -37,7 +38,7 @@ public record RetryEntry(
     }
 
     public static RetryEntry first(FailureContext ctx, String fingerprint, Instant nextAttemptAt, String reason) {
-        return new RetryEntry(idFor(fingerprint), fingerprint, ctx.correlationId(), ctx.originalTopic(), ctx.key(),
+        return new RetryEntry(idFor(fingerprint), ctx.stream(), fingerprint, ctx.correlationId(), ctx.originalTopic(), ctx.key(),
                 ctx.payload(), ctx.headers(), 0, nextAttemptAt, RetryStatus.SCHEDULED, ctx.eventId(), reason);
     }
 }

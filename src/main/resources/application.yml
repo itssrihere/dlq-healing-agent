@@ -39,9 +39,8 @@ spring:
 
 dlqagent:
   topics:
-    main: orders-topic
-    dlq: orders-dlq
-    partitions: 3
+    partitions: 3                # for topics this service declares itself
+    declare: true                # local and tests only: set false where topics are managed elsewhere
   retry:
     max-attempts: 5
     initial-delay: 2s
@@ -58,11 +57,22 @@ dlqagent:
     min-confidence: 0.7
     max-payload-chars: 4000      # prompt size bound; longer text is truncated
     max-stack-trace-chars: 2000
-  contract:
-    schema: classpath:contracts/orders.schema.json   # the single source of truth for the shape of an event
-    identity-fields: [orderId, customerId]           # never edited by the agent, must be unchanged in a repair
-    key-field: orderId                               # must equal the Kafka key
-    no-future-fields: [createdAt]                    # a timestamp the schema cannot bound
+  # One entry per DLQ this service heals. A DLQ has exactly one source topic. Each stream gets its own listener,
+  # circuit breaker and retry budget, so a problem in one cannot stall another.
+  streams:
+    - name: orders
+      dlq-topic: orders-dlq
+      source-topic: orders-topic
+      group-id: dlq-healing-agent                        # keep: a new id would re-read the whole DLQ
+      contract:
+        schema: classpath:contracts/orders.schema.json   # the single source of truth for the shape of an event
+        identity-fields: [orderId, customerId]           # never edited by the agent, must be unchanged in a repair
+        key-field: orderId                               # must equal the Kafka key
+        no-future-fields: [createdAt]                    # a timestamp the schema cannot bound
+        tables: [orders]                                 # tables the model may describe for this stream
+      # auto-replay: false                               # optional: every repair waits for a human
+      # auto-replay-min-confidence: 0.9                  # optional per-stream override of gate.*
+      # max-attempts: 5                                  # optional per-stream override of retry.max-attempts
   gate:
     auto-replay-min-confidence: 0.9   # below this, even a risk-free repair waits for a human (Tier 2)
   approval:
@@ -87,4 +97,4 @@ management:
 
 logging:
   pattern:
-    level: "%5p [cid=%X{correlationId:-}] [trace=%X{traceId:-}]"
+    level: "%5p [stream=%X{stream:-}] [cid=%X{correlationId:-}] [trace=%X{traceId:-}]"

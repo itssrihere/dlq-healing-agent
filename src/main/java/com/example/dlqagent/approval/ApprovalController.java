@@ -38,8 +38,9 @@ class ApprovalController {
     @GetMapping
     List<ApprovalView> list(
             @RequestParam(defaultValue = "PENDING_HUMAN_APPROVAL") QuarantineStatus status,
+            @RequestParam(required = false) String stream,
             @RequestParam(defaultValue = "50") int limit) {
-        return service.list(status, limit).stream().map(ApprovalView::of).toList();
+        return service.list(status, stream, limit).stream().map(ApprovalView::of).toList();
     }
 
     @GetMapping("/{id}")

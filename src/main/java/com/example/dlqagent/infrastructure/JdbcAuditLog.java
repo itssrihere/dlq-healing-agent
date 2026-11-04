@@ -21,7 +21,7 @@ import org.springframework.stereotype.Repository;
 class JdbcAuditLog implements AuditLog {
 
     private static final String COLUMNS = """
-            id, event_id, correlation_id, trace_id, occurred_at, stage, original_topic, kafka_key, strategy,
+            id, event_id, stream, correlation_id, trace_id, occurred_at, stage, original_topic, kafka_key, strategy,
             planner_confidence, planner_rationale, repair_summary, repair_confidence, tool_calls, changes,
             risk_flags, tier, outcome, outcome_reason, actor, duration_ms""";
 
@@ -37,11 +37,11 @@ class JdbcAuditLog implements AuditLog {
     public boolean record(AuditEntry e) {
         int rows = jdbc.sql("""
                 INSERT INTO dlq_audit_log
-                    (id, event_id, correlation_id, trace_id, occurred_at, stage, original_topic, kafka_key, strategy,
+                    (id, event_id, stream, correlation_id, trace_id, occurred_at, stage, original_topic, kafka_key, strategy,
                      planner_confidence, planner_rationale, repair_summary, repair_confidence,
                      tool_calls, changes, risk_flags, tier, outcome, outcome_reason, actor, duration_ms)
                 VALUES
-                    (:id, :eventId, :correlationId, :traceId, :occurredAt, :stage, :originalTopic, :key, :strategy,
+                    (:id, :eventId, :stream, :correlationId, :traceId, :occurredAt, :stage, :originalTopic, :key, :strategy,
                      :plannerConfidence, :plannerRationale, :repairSummary, :repairConfidence,
                      CAST(:toolCalls AS jsonb), CAST(:changes AS jsonb), CAST(:riskFlags AS jsonb),
                      :tier, :outcome, :outcomeReason, :actor, :durationMs)
@@ -49,6 +49,7 @@ class JdbcAuditLog implements AuditLog {
                 """)
                 .param("id", e.id())
                 .param("eventId", e.eventId())
+                .param("stream", e.stream())
                 .param("correlationId", e.correlationId())
                 .param("traceId", e.traceId())
                 .param("occurredAt", OffsetDateTime.ofInstant(e.occurredAt(), ZoneOffset.UTC))
@@ -83,6 +84,7 @@ class JdbcAuditLog implements AuditLog {
         return new AuditEntry(
                 rs.getObject("id", UUID.class),
                 rs.getObject("event_id", UUID.class),
+                rs.getString("stream"),
                 rs.getString("correlation_id"),
                 rs.getString("trace_id"),
                 rs.getObject("occurred_at", OffsetDateTime.class).toInstant(),

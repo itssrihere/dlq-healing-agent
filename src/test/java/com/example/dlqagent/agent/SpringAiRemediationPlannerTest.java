@@ -23,7 +23,7 @@ class SpringAiRemediationPlannerTest {
             new ClassPathResource("prompts/planner-system.txt"));
 
     private static FailureContext failure(String payload, String stackTrace) {
-        return new FailureContext("cid-1", "orders-dlq", 0, 1L, "orders-topic", "k",
+        return new FailureContext("orders", "cid-1", "orders-dlq", 0, 1L, "orders-topic", "k",
                 payload, Map.of("tenant", "acme"), stackTrace, Instant.now());
     }
 

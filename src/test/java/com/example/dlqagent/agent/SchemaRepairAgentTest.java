@@ -31,7 +31,7 @@ class SchemaRepairAgentTest {
             new ClassPathResource("prompts/repair-system.txt"));
 
     private static FailureContext failure(String payload) {
-        return new FailureContext("cid-1", "orders-dlq", 0, 1L, "orders-topic", "o-1", payload, Map.of(),
+        return new FailureContext("orders", "cid-1", "orders-dlq", 0, 1L, "orders-topic", "o-1", payload, Map.of(),
                 "ConstraintViolation: amount", Instant.now());
     }
 
@@ -129,7 +129,7 @@ class SchemaRepairAgentTest {
         model.respondWith(p -> {
             throw new AssertionError("model must not be called");
         });
-        var other = new FailureContext("cid-1", "orders-dlq", 0, 1L, "payments-topic", "k", DRIFTED, Map.of(), null,
+        var other = new FailureContext("orders", "cid-1", "orders-dlq", 0, 1L, "payments-topic", "k", DRIFTED, Map.of(), null,
                 Instant.now());
 
         assertThat(agent.repair(other)).isInstanceOfSatisfying(RepairResult.Unrepairable.class,

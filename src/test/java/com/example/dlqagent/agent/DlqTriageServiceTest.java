@@ -29,7 +29,8 @@ import com.example.dlqagent.domain.RepairResult;
 import com.example.dlqagent.domain.ToolCallRecord;
 import com.example.dlqagent.observability.TraceContext;
 import com.example.dlqagent.retry.RetryScheduler;
-import com.example.dlqagent.support.TestProps;
+import com.example.dlqagent.support.TestStreams;
+import com.example.dlqagent.stream.HealingStream;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
 import java.util.List;
@@ -48,11 +49,12 @@ class DlqTriageServiceTest {
     private final AuditLog audit = mock(AuditLog.class);
     private final RetryScheduler retryScheduler = mock(RetryScheduler.class);
     private final PlatformTransactionManager txManager = mock(PlatformTransactionManager.class);
+    private final HealingStream stream = TestStreams.orders();
     private final DlqTriageService service = new DlqTriageService(planner, repairer, replayer, repo, audit,
-            TestProps.defaults(), ObservationRegistry.NOOP, new TransactionTemplate(txManager), new TraceContext(null),
+            ObservationRegistry.NOOP, new TransactionTemplate(txManager), new TraceContext(null),
             retryScheduler);
     // auto-replay needs >= 0.9
-    private final FailureContext ctx = new FailureContext(
+    private final FailureContext ctx = new FailureContext("orders", 
             "cid-1", "orders-dlq", 0, 7L, "orders-topic", "k", "{bad", Map.of("h", "v"), "trace", Instant.now());
 
     private QuarantineRecord saved() {
@@ -85,7 +87,7 @@ class DlqTriageServiceTest {
     void quarantinePlanIsPersistedAsPoisonPill() {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.Quarantine("corrupt"));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         QuarantineRecord r = saved();
         assertThat(r.strategy()).isEqualTo(RemediationStrategy.POISON_PILL);
@@ -102,7 +104,7 @@ class DlqTriageServiceTest {
         var repaired = repaired(0.95);
         planRepair(0.95, repaired);
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         verify(replayer).replay(ReplayRequest.automatic(ctx, repaired));
         verifyNoInteractions(repo);
@@ -112,7 +114,7 @@ class DlqTriageServiceTest {
     void confidenceExactlyAtTheThresholdIsStillTier1() {
         planRepair(0.9, repaired(0.9));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         verify(replayer).replay(any());
         verifyNoInteractions(repo);
@@ -125,7 +127,7 @@ class DlqTriageServiceTest {
         var repaired = repaired(1.0, "createdAt 'x' is ambiguous");
         planRepair(1.0, repaired);
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         QuarantineRecord r = saved();
         assertThat(r.status()).isEqualTo(QuarantineStatus.PENDING_HUMAN_APPROVAL);
@@ -142,7 +144,7 @@ class DlqTriageServiceTest {
     void lowRepairConfidenceDemotesAnOtherwiseCleanRepair() {
         planRepair(0.99, repaired(0.8));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         assertThat(saved().reason()).contains("repair confidence 0.80 is below the auto-replay threshold 0.90");
         verifyNoInteractions(replayer);
@@ -154,7 +156,7 @@ class DlqTriageServiceTest {
         var repaired = repaired(0.95);
         planRepair(0.75, repaired);
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         verify(replayer).replay(ReplayRequest.automatic(ctx, repaired));
         verifyNoInteractions(repo);
@@ -164,7 +166,7 @@ class DlqTriageServiceTest {
     void aConfidentPlannerCannotRescueALowConfidenceRepair() {
         planRepair(1.0, repaired(0.85));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         assertThat(saved().reason()).contains("repair confidence 0.85");
         verifyNoInteractions(replayer);
@@ -174,7 +176,7 @@ class DlqTriageServiceTest {
     void reasonListsEveryCauseForHumanApproval() {
         planRepair(0.95, repaired(0.5, "flag one", "flag two"));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         assertThat(saved().reason()).contains("flag one", "flag two", "repair confidence 0.50 is below the auto-replay threshold");
     }
@@ -185,7 +187,7 @@ class DlqTriageServiceTest {
     void unrepairableEventIsQuarantinedAsSchemaDriftAndNotReplayed() {
         planRepair(0.9, new RepairResult.Unrepairable("gate said no"));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         QuarantineRecord r = saved();
         assertThat(r.strategy()).isEqualTo(RemediationStrategy.SCHEMA_DRIFT);
@@ -199,8 +201,8 @@ class DlqTriageServiceTest {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.SchemaRepair("x", 0.9));
         when(repairer.repair(ctx)).thenThrow(new IllegalStateException("boom")).thenReturn(null);
 
-        service.triage(ctx);
-        service.triage(ctx);
+        service.triage(stream, ctx);
+        service.triage(stream, ctx);
 
         verify(repo, times(2)).save(any());
         verifyNoInteractions(replayer);
@@ -211,17 +213,17 @@ class DlqTriageServiceTest {
         planRepair(0.95, repaired(0.95));
         doThrow(new IllegalStateException("broker down")).when(replayer).replay(any());
 
-        assertThatThrownBy(() -> service.triage(ctx)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> service.triage(stream, ctx)).isInstanceOf(IllegalStateException.class);
         verifyNoInteractions(repo);
     }
 
     @Test
     void neverReplaysOrQueuesForATopicOtherThanTheMainTopic() {
-        var spoofed = new FailureContext("cid-1", "orders-dlq", 0, 7L, "payments-topic", "k", "{}", Map.of(), null,
+        var spoofed = new FailureContext("orders", "cid-1", "orders-dlq", 0, 7L, "payments-topic", "k", "{}", Map.of(), null,
                 Instant.now());
         when(planner.plan(spoofed)).thenReturn(new RemediationPlan.SchemaRepair("x", 0.9));
 
-        service.triage(spoofed);
+        service.triage(stream, spoofed);
 
         assertThat(saved().reason()).contains("unexpected topic");
         verifyNoInteractions(repairer, replayer);
@@ -229,10 +231,10 @@ class DlqTriageServiceTest {
 
     @Test
     void alreadyRepairedEventGoesStraightToQuarantineWithoutPlanning() {
-        var again = new FailureContext("cid-1", "orders-dlq", 0, 7L, "orders-topic", "k", "{}",
+        var again = new FailureContext("orders", "cid-1", "orders-dlq", 0, 7L, "orders-topic", "k", "{}",
                 Map.of("x-repaired-by-agent", "true"), null, Instant.now());
 
-        service.triage(again);
+        service.triage(stream, again);
 
         assertThat(saved().reason()).contains("already repaired");
         verifyNoInteractions(planner, repairer, replayer);
@@ -244,9 +246,9 @@ class DlqTriageServiceTest {
     void transientFailureIsScheduledNotReplayedOrQuarantined() {
         Instant at = Instant.parse("2026-01-01T00:00:02Z");
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
-        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.Scheduled(1, 5, at, false));
+        when(retryScheduler.recordFailure(stream, ctx, "conn reset")).thenReturn(new RetryDecision.Scheduled(1, 5, at, false));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         verify(replayer, never()).replay(any());
         verifyNoInteractions(repo);
@@ -260,9 +262,9 @@ class DlqTriageServiceTest {
     @Test
     void exhaustedRetriesAreQuarantinedWithTheReason() {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
-        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.Exhausted("Still failing after 5 replays"));
+        when(retryScheduler.recordFailure(stream, ctx, "conn reset")).thenReturn(new RetryDecision.Exhausted("Still failing after 5 replays"));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         QuarantineRecord r = saved();
         assertThat(r.strategy()).isEqualTo(RemediationStrategy.TRANSIENT);
@@ -275,20 +277,20 @@ class DlqTriageServiceTest {
     @Test
     void redeliveryOfAnAlreadyHandledRecordWritesNothing() {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
-        when(retryScheduler.recordFailure(ctx, "conn reset")).thenReturn(new RetryDecision.AlreadyHandled());
+        when(retryScheduler.recordFailure(stream, ctx, "conn reset")).thenReturn(new RetryDecision.AlreadyHandled());
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         verifyNoInteractions(repo, audit, replayer);
     }
 
     @Test
     void transientRetryNeverTargetsATopicTheHeaderMadeUp() {
-        FailureContext spoofed = new FailureContext(
+        FailureContext spoofed = new FailureContext("orders", 
                 "cid-1", "orders-dlq", 0, 7L, "payments-topic", "k", "{}", Map.of(), "trace", Instant.now());
         when(planner.plan(spoofed)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
 
-        service.triage(spoofed);
+        service.triage(stream, spoofed);
 
         verifyNoInteractions(retryScheduler, replayer);
         assertThat(saved().reason()).contains("unexpected topic");
@@ -297,9 +299,9 @@ class DlqTriageServiceTest {
     @Test
     void schedulerFailurePropagatesSoTheListenerRetries() {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.TransientRetry("conn reset", 0.9));
-        when(retryScheduler.recordFailure(ctx, "conn reset")).thenThrow(new IllegalStateException("db down"));
+        when(retryScheduler.recordFailure(stream, ctx, "conn reset")).thenThrow(new IllegalStateException("db down"));
 
-        assertThatThrownBy(() -> service.triage(ctx)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> service.triage(stream, ctx)).isInstanceOf(IllegalStateException.class);
         verifyNoInteractions(audit);
     }
 
@@ -307,8 +309,8 @@ class DlqTriageServiceTest {
     void plannerExceptionAndNullPlanFailClosed() {
         when(planner.plan(any())).thenThrow(new IllegalStateException("llm down")).thenReturn(null);
 
-        service.triage(ctx);
-        service.triage(ctx);
+        service.triage(stream, ctx);
+        service.triage(stream, ctx);
 
         ArgumentCaptor<QuarantineRecord> captor = ArgumentCaptor.forClass(QuarantineRecord.class);
         verify(repo, times(2)).save(captor.capture());
@@ -322,7 +324,7 @@ class DlqTriageServiceTest {
     void tier1WritesAnAuditRowWithTheAgentsReasoningToolCallsAndDiff() {
         planRepair(0.95, repaired(0.95));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         AuditEntry a = audited();
         assertThat(a.id()).isEqualTo(AuditEntry.idFor(ctx.eventId(), AuditEntry.Stage.TRIAGE));
@@ -349,7 +351,7 @@ class DlqTriageServiceTest {
     void tier2AuditRowCarriesTheRiskFlagsAndIsSavedInOneTransactionWithTheHeldRow() {
         planRepair(0.95, repaired(0.95, "createdAt is ambiguous"));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         AuditEntry a = audited();
         assertThat(a.tier()).isEqualTo(AuditEntry.Tier.TIER_2);
@@ -366,7 +368,7 @@ class DlqTriageServiceTest {
         when(repairer.repair(ctx)).thenReturn(
                 new RepairResult.Unrepairable("gate said no", "tried a date fix", 0.6, TOOLS, CHANGES));
 
-        service.triage(ctx);
+        service.triage(stream, ctx);
 
         AuditEntry a = audited();
         assertThat(a.outcome()).isEqualTo(AuditEntry.Outcome.QUARANTINED);
@@ -384,10 +386,10 @@ class DlqTriageServiceTest {
     @Test
     void poisonPillAndLoopGuardAreAuditedToo() {
         when(planner.plan(ctx)).thenReturn(new RemediationPlan.Quarantine("corrupt"));
-        service.triage(ctx);
-        var again = new FailureContext("cid-2", "orders-dlq", 0, 8L, "orders-topic", "k", "{}",
+        service.triage(stream, ctx);
+        var again = new FailureContext("orders", "cid-2", "orders-dlq", 0, 8L, "orders-topic", "k", "{}",
                 Map.of("x-repaired-by-agent", "true"), null, Instant.now());
-        service.triage(again);
+        service.triage(stream, again);
 
         ArgumentCaptor<AuditEntry> captor = ArgumentCaptor.forClass(AuditEntry.class);
         verify(audit, times(2)).record(captor.capture());
@@ -405,7 +407,7 @@ class DlqTriageServiceTest {
         planRepair(0.95, repaired(0.95));
         doThrow(new IllegalStateException("broker down")).when(replayer).replay(any());
 
-        assertThatThrownBy(() -> service.triage(ctx)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> service.triage(stream, ctx)).isInstanceOf(IllegalStateException.class);
 
         verifyNoInteractions(audit);
     }

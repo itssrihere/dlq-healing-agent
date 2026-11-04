@@ -14,7 +14,9 @@ import com.example.dlqagent.domain.RetryDecision;
 import com.example.dlqagent.domain.RetryEntry;
 import com.example.dlqagent.domain.RetryScheduleRepository;
 import com.example.dlqagent.domain.RetryStatus;
+import com.example.dlqagent.stream.HealingStream;
 import com.example.dlqagent.support.TestProps;
+import com.example.dlqagent.support.TestStreams;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
@@ -27,18 +29,19 @@ class RetrySchedulerTest {
     private final RetryScheduleRepository repo = mock(RetryScheduleRepository.class);
     private final ReplayCircuitBreaker breaker = mock(ReplayCircuitBreaker.class);
     private final MutableClock clock = new MutableClock();
-    private final RetryScheduler scheduler = new RetryScheduler(repo, breaker, TestProps.defaults(), clock); // 5 replays, 2s x2
-    private final FailureContext ctx = new FailureContext(
+    private final HealingStream stream = TestStreams.orders(breaker);
+    private final RetryScheduler scheduler = new RetryScheduler(repo, TestProps.defaults(), clock); // 5 replays, 2s x2
+    private final FailureContext ctx = new FailureContext("orders", 
             "cid", "orders-dlq", 0, 1L, "orders-topic", "k", "{\"a\":1}", Map.of(), "trace", clock.instant());
     private final String fingerprint = RetryFingerprint.of("orders-topic", "k", "{\"a\":1}");
 
     private RetryEntry row(RetryStatus status, int attempt, FailureContext lastSeen) {
-        return new RetryEntry(RetryEntry.idFor(fingerprint), fingerprint, "cid", "orders-topic", "k", "{\"a\":1}",
+        return new RetryEntry(RetryEntry.idFor(fingerprint), "orders", fingerprint, "cid", "orders-topic", "k", "{\"a\":1}",
                 Map.of(), attempt, clock.instant(), status, lastSeen.eventId(), "old reason");
     }
 
     private FailureContext later() {
-        return new FailureContext("cid", "orders-dlq", 0, 2L, "orders-topic", "k", "{\"a\":1}", Map.of(), "t", clock.instant());
+        return new FailureContext("orders", "cid", "orders-dlq", 0, 2L, "orders-topic", "k", "{\"a\":1}", Map.of(), "t", clock.instant());
     }
 
     @Test
@@ -46,7 +49,7 @@ class RetrySchedulerTest {
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.empty());
         when(repo.insertIfAbsent(any())).thenReturn(true);
 
-        RetryDecision d = scheduler.recordFailure(ctx, "conn reset");
+        RetryDecision d = scheduler.recordFailure(stream, ctx, "conn reset");
 
         assertThat(d).isEqualTo(new RetryDecision.Scheduled(1, 5, clock.instant().plus(Duration.ofSeconds(2)), false));
         ArgumentCaptor<RetryEntry> saved = ArgumentCaptor.forClass(RetryEntry.class);
@@ -61,7 +64,7 @@ class RetrySchedulerTest {
         FailureContext next = later();
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.of(row(RetryStatus.REPLAYED, 2, ctx)));
 
-        RetryDecision d = scheduler.recordFailure(next, "conn reset");
+        RetryDecision d = scheduler.recordFailure(stream, next, "conn reset");
 
         Instant at = clock.instant().plus(Duration.ofSeconds(8)); // delayBefore(2) = 2s * 2^2
         assertThat(d).isEqualTo(new RetryDecision.Scheduled(3, 5, at, false));
@@ -74,7 +77,7 @@ class RetrySchedulerTest {
         FailureContext next = later();
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.of(row(RetryStatus.REPLAYED, 5, ctx)));
 
-        RetryDecision d = scheduler.recordFailure(next, "conn reset");
+        RetryDecision d = scheduler.recordFailure(stream, next, "conn reset");
 
         assertThat(d).isInstanceOf(RetryDecision.Exhausted.class);
         assertThat(((RetryDecision.Exhausted) d).reason()).contains("5 replays").contains("conn reset");
@@ -87,7 +90,7 @@ class RetrySchedulerTest {
         // The row was scheduled by this very record and may already have been replayed since.
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.of(row(RetryStatus.REPLAYED, 1, ctx)));
 
-        assertThat(scheduler.recordFailure(ctx, "conn reset")).isInstanceOf(RetryDecision.AlreadyHandled.class);
+        assertThat(scheduler.recordFailure(stream, ctx, "conn reset")).isInstanceOf(RetryDecision.AlreadyHandled.class);
 
         verify(repo, never()).reschedule(any(), any(), any(), any());
         verify(repo, never()).markExhausted(any(), any(), any());
@@ -98,7 +101,7 @@ class RetrySchedulerTest {
     void anIdenticalEventWhileAReplayIsPendingDoesNotSpendAnotherAttempt() {
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.of(row(RetryStatus.SCHEDULED, 0, ctx)));
 
-        RetryDecision d = scheduler.recordFailure(later(), "conn reset");
+        RetryDecision d = scheduler.recordFailure(stream, later(), "conn reset");
 
         assertThat(d).isInstanceOfSatisfying(RetryDecision.Scheduled.class, s -> {
             assertThat(s.duplicate()).isTrue();
@@ -111,7 +114,7 @@ class RetrySchedulerTest {
     void anExhaustedEventStaysExhausted() {
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.of(row(RetryStatus.EXHAUSTED, 5, ctx)));
 
-        assertThat(scheduler.recordFailure(later(), "conn reset")).isInstanceOf(RetryDecision.Exhausted.class);
+        assertThat(scheduler.recordFailure(stream, later(), "conn reset")).isInstanceOf(RetryDecision.Exhausted.class);
         verify(repo, never()).reschedule(any(), any(), any(), any());
     }
 
@@ -120,7 +123,7 @@ class RetrySchedulerTest {
         when(repo.lockByFingerprint(fingerprint)).thenReturn(Optional.empty(), Optional.of(row(RetryStatus.SCHEDULED, 0, later())));
         when(repo.insertIfAbsent(any())).thenReturn(false);
 
-        RetryDecision d = scheduler.recordFailure(ctx, "conn reset");
+        RetryDecision d = scheduler.recordFailure(stream, ctx, "conn reset");
 
         assertThat(d).isInstanceOfSatisfying(RetryDecision.Scheduled.class, s -> assertThat(s.duplicate()).isTrue());
         verify(repo, never()).reschedule(any(), eq(clock.instant()), any(), any());

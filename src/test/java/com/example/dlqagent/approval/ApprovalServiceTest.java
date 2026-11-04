@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -11,7 +12,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.example.dlqagent.agent.TopicAdapterRegistry;
 import com.example.dlqagent.domain.AuditEntry;
 import com.example.dlqagent.domain.AuditLog;
 import com.example.dlqagent.domain.Evaluation;
@@ -23,6 +23,8 @@ import com.example.dlqagent.domain.RemediationStrategy;
 import com.example.dlqagent.domain.ReplayRequest;
 import com.example.dlqagent.domain.TopicAdapter;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.stream.StreamRegistry;
+import com.example.dlqagent.support.TestStreams;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
 import java.util.List;
@@ -40,16 +42,16 @@ class ApprovalServiceTest {
     private final EventReplayer replayer = mock(EventReplayer.class);
     private final TopicAdapter adapter = mock(TopicAdapter.class);
     private final AuditLog audit = mock(AuditLog.class);
+    private final StreamRegistry streams = mock(StreamRegistry.class);
     private final ApprovalService service;
 
     ApprovalServiceTest() {
-        when(adapter.topic()).thenReturn("orders-topic"); // must be stubbed before the registry reads it
-        service = new ApprovalService(repo, new TopicAdapterRegistry(List.of(adapter)), replayer, audit,
-                new TraceContext(null), ObservationRegistry.NOOP);
+        when(streams.byName("orders")).thenReturn(Optional.of(TestStreams.ordersWith(adapter)));
+        service = new ApprovalService(repo, streams, replayer, audit, new TraceContext(null), ObservationRegistry.NOOP);
     }
 
     private static QuarantineRecord record(QuarantineStatus status) {
-        return new QuarantineRecord(ID, "cid-1", "orders-topic", "k", "{\"orig\":1}", Map.of("tenant", "acme"), null,
+        return new QuarantineRecord(ID, "orders", "cid-1", "orders-topic", "k", "{\"orig\":1}", Map.of("tenant", "acme"), null,
                 RemediationStrategy.SCHEMA_DRIFT, "Awaiting human approval: x", status, Instant.now(),
                 "{\"proposed\":1}", "summary text", List.of("flag"), null, null, null);
     }
@@ -142,8 +144,21 @@ class ApprovalServiceTest {
     }
 
     @Test
+    void approvingAnEventOfAStreamThatIsNoLongerConfiguredIsAConflict() {
+        var gone = new QuarantineRecord(ID, "retired", "cid", "orders-topic", "k", "{}", Map.of(), null,
+                RemediationStrategy.SCHEMA_DRIFT, "r", QuarantineStatus.PENDING_HUMAN_APPROVAL, Instant.now(),
+                "{}", "s", List.of(), null, null, null);
+        when(repo.findForUpdate(ID)).thenReturn(Optional.of(gone));
+        when(streams.byName("retired")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.approve(ID, "a", null))
+                .isInstanceOf(ApprovalConflictException.class).hasMessageContaining("'retired' is not configured");
+        verifyNoInteractions(replayer);
+    }
+
+    @Test
     void approveWithoutAnAdapterForTheTopicIsAConflict() {
-        var other = new QuarantineRecord(ID, "cid", "payments-topic", "k", "{}", Map.of(), null,
+        var other = new QuarantineRecord(ID, "orders", "cid", "payments-topic", "k", "{}", Map.of(), null,
                 RemediationStrategy.SCHEMA_DRIFT, "r", QuarantineStatus.PENDING_HUMAN_APPROVAL, Instant.now(),
                 "{}", "s", List.of(), null, null, null);
         when(repo.findForUpdate(ID)).thenReturn(Optional.of(other));
@@ -170,12 +185,12 @@ class ApprovalServiceTest {
 
     @Test
     void listClampsTheLimit() {
-        service.list(QuarantineStatus.PENDING_HUMAN_APPROVAL, 100_000);
-        service.list(QuarantineStatus.PENDING_HUMAN_APPROVAL, -5);
+        service.list(QuarantineStatus.PENDING_HUMAN_APPROVAL, null, 100_000);
+        service.list(QuarantineStatus.PENDING_HUMAN_APPROVAL, null, -5);
 
-        verify(repo).findByStatus(QuarantineStatus.PENDING_HUMAN_APPROVAL, 100);
-        verify(repo).findByStatus(eq(QuarantineStatus.PENDING_HUMAN_APPROVAL), eq(1));
-        verify(repo, never()).findByStatus(any(), eq(100_000));
-        verify(repo, never()).findByStatus(any(), eq(-5));
+        verify(repo).findByStatus(QuarantineStatus.PENDING_HUMAN_APPROVAL, null, 100);
+        verify(repo).findByStatus(eq(QuarantineStatus.PENDING_HUMAN_APPROVAL), isNull(), eq(1));
+        verify(repo, never()).findByStatus(any(), any(), eq(100_000));
+        verify(repo, never()).findByStatus(any(), any(), eq(-5));
     }
 }

@@ -23,12 +23,13 @@ public final class SchemaDrivenTopicAdapter implements TopicAdapter {
     private final ContractTools tools;
     private final String prompt;
 
-    public SchemaDrivenTopicAdapter(String topic, SchemaContract contract, SchemaInspector inspector) {
+    public SchemaDrivenTopicAdapter(String topic, SchemaContract contract, SchemaInspector inspector,
+                                    Set<String> tables) {
         this.topic = topic;
         this.contract = contract;
         this.editable = contract.editableFields();
         this.rules = new ChangeRules(contract);
-        this.tools = new ContractTools(inspector, this);
+        this.tools = new ContractTools(inspector, this, tables);
         this.prompt = prompt(topic, contract, editable);
     }
 

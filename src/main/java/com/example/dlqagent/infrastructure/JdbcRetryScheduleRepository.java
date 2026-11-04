@@ -21,7 +21,7 @@ import org.springframework.stereotype.Repository;
 class JdbcRetryScheduleRepository implements RetryScheduleRepository {
 
     private static final String COLUMNS = """
-            id, fingerprint, correlation_id, target_topic, kafka_key, payload, headers, attempt, next_attempt_at,
+            id, stream, fingerprint, correlation_id, target_topic, kafka_key, payload, headers, attempt, next_attempt_at,
             status, last_event_id, last_error""";
 
     private final JdbcClient jdbc;
@@ -36,14 +36,15 @@ class JdbcRetryScheduleRepository implements RetryScheduleRepository {
     public boolean insertIfAbsent(RetryEntry e) {
         return jdbc.sql("""
                 INSERT INTO retry_schedule
-                    (id, fingerprint, correlation_id, target_topic, kafka_key, payload, headers, attempt,
+                    (id, stream, fingerprint, correlation_id, target_topic, kafka_key, payload, headers, attempt,
                      next_attempt_at, status, last_event_id, last_error)
                 VALUES
-                    (:id, :fingerprint, :correlationId, :topic, :key, :payload, CAST(:headers AS jsonb), :attempt,
+                    (:id, :stream, :fingerprint, :correlationId, :topic, :key, :payload, CAST(:headers AS jsonb), :attempt,
                      :next, :status, :lastEventId, :lastError)
                 ON CONFLICT (fingerprint) DO NOTHING
                 """)
                 .param("id", e.id())
+                .param("stream", e.stream())
                 .param("fingerprint", e.fingerprint())
                 .param("correlationId", e.correlationId())
                 .param("topic", e.targetTopic())
@@ -65,15 +66,17 @@ class JdbcRetryScheduleRepository implements RetryScheduleRepository {
     }
 
     @Override
-    public Optional<RetryEntry> lockNextDue(Instant now) {
+    public Optional<RetryEntry> lockNextDue(Instant now, String stream, String sourceTopic) {
         return jdbc.sql("SELECT " + COLUMNS + """
                  FROM retry_schedule
                 WHERE status = 'SCHEDULED' AND next_attempt_at <= :now
+                  AND stream = :stream AND target_topic = :topic
                 ORDER BY next_attempt_at
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
                 """)
-                .param("now", at(now)).query(this::map).optional();
+                .param("now", at(now)).param("stream", stream).param("topic", sourceTopic)
+                .query(this::map).optional();
     }
 
     @Override
@@ -107,6 +110,7 @@ class JdbcRetryScheduleRepository implements RetryScheduleRepository {
     private RetryEntry map(ResultSet rs, int row) throws SQLException {
         return new RetryEntry(
                 rs.getObject("id", UUID.class),
+                rs.getString("stream"),
                 rs.getString("fingerprint"),
                 rs.getString("correlation_id"),
                 rs.getString("target_topic"),

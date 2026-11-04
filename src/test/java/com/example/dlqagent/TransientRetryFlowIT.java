@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.example.dlqagent.retry.ReplayCircuitBreaker;
+import com.example.dlqagent.stream.StreamRegistry;
 import com.example.dlqagent.retry.RetryPoller;
 import com.example.dlqagent.support.MainTopicReader;
 import com.example.dlqagent.support.ScriptedChatModel;
@@ -36,7 +37,7 @@ class TransientRetryFlowIT extends AbstractIntegrationTest {
     @Autowired JdbcClient jdbc;
     @Autowired ScriptedChatModel llm;
     @Autowired RetryPoller poller;
-    @Autowired ReplayCircuitBreaker breaker;
+    @Autowired StreamRegistry streams;
 
     @AfterEach
     void resetLlm() {
@@ -139,9 +140,9 @@ class TransientRetryFlowIT extends AbstractIntegrationTest {
         String key = "o-" + UUID.randomUUID();
         String cid = "cid-" + UUID.randomUUID();
         jdbc.sql("""
-                INSERT INTO retry_schedule (id, fingerprint, correlation_id, target_topic, kafka_key, payload,
+                INSERT INTO retry_schedule (id, stream, fingerprint, correlation_id, target_topic, kafka_key, payload,
                                             attempt, next_attempt_at, status, last_event_id, last_error)
-                VALUES (:id, :f, :c, 'orders-topic', :k, :p, 0, now() - interval '1 minute', 'SCHEDULED', :e, 'seeded')
+                VALUES (:id, 'orders', :f, :c, 'orders-topic', :k, :p, 0, now() - interval '1 minute', 'SCHEDULED', :e, 'seeded')
                 """)
                 .param("id", UUID.randomUUID()).param("f", "%064x".formatted(Math.abs(UUID.randomUUID().getMostSignificantBits())))
                 .param("c", cid).param("k", key).param("p", payload(key)).param("e", UUID.randomUUID()).update();
@@ -172,13 +173,13 @@ class TransientRetryFlowIT extends AbstractIntegrationTest {
         String key = "o-" + UUID.randomUUID();
         String cid = "cid-" + UUID.randomUUID();
         for (int i = 0; i < 4; i++) { // breaker.failure-threshold = 4 in tests
-            breaker.recordRetryFailure();
+            streams.byName("orders").orElseThrow().breaker().recordRetryFailure();
         }
-        assertThat(breaker.state()).isEqualTo(ReplayCircuitBreaker.State.OPEN);
+        assertThat(streams.byName("orders").orElseThrow().breaker().state()).isEqualTo(ReplayCircuitBreaker.State.OPEN);
         jdbc.sql("""
-                INSERT INTO retry_schedule (id, fingerprint, correlation_id, target_topic, kafka_key, payload,
+                INSERT INTO retry_schedule (id, stream, fingerprint, correlation_id, target_topic, kafka_key, payload,
                                             attempt, next_attempt_at, status, last_event_id, last_error)
-                VALUES (:id, :f, :c, 'orders-topic', :k, :p, 0, now() - interval '1 minute', 'SCHEDULED', :e, 'seeded')
+                VALUES (:id, 'orders', :f, :c, 'orders-topic', :k, :p, 0, now() - interval '1 minute', 'SCHEDULED', :e, 'seeded')
                 """)
                 .param("id", UUID.randomUUID()).param("f", "%064x".formatted(Math.abs(UUID.randomUUID().getMostSignificantBits())))
                 .param("c", cid).param("k", key).param("p", payload(key)).param("e", UUID.randomUUID()).update();
@@ -193,6 +194,6 @@ class TransientRetryFlowIT extends AbstractIntegrationTest {
 
         // Nothing came back for the canary, so the breaker closes again.
         await().atMost(Duration.ofSeconds(10))
-                .untilAsserted(() -> assertThat(breaker.state()).isEqualTo(ReplayCircuitBreaker.State.CLOSED));
+                .untilAsserted(() -> assertThat(streams.byName("orders").orElseThrow().breaker().state()).isEqualTo(ReplayCircuitBreaker.State.CLOSED));
     }
 }

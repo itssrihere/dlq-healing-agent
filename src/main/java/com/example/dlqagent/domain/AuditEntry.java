@@ -15,6 +15,7 @@ import java.util.UUID;
 public record AuditEntry(
         UUID id,
         UUID eventId,
+        String stream,
         String correlationId,
         String traceId,
         Instant occurredAt,

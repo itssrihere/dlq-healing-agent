@@ -10,6 +10,8 @@ import com.example.dlqagent.domain.RetryScheduleRepository;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
 import com.example.dlqagent.observability.LogSafe;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.stream.HealingStream;
+import com.example.dlqagent.stream.StreamRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Clock;
@@ -23,8 +25,9 @@ import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Replays due retries, unchanged. Each replay claims one row, asks the circuit breaker, sends, and records the
- * replay and its audit row in one transaction. Two instances cannot take the same row (the claim skips locked rows),
+ * Replays due retries, unchanged. Each replay claims one row of one stream, asks that stream's circuit breaker, sends,
+ * and records the replay and its audit row in one transaction. Streams are served in turn, so one stream's open
+ * breaker (or backlog) never holds back another's. Two instances cannot take the same row (the claim skips locked rows),
  * and a crash before commit leaves the row due, so it is replayed again: at-least-once, like every replay here.
  *
  * <p>Replays per wake-up are capped by {@code retry.batch-size}, which bounds the rate at which a backlog is sent.
@@ -37,7 +40,7 @@ public class RetryPoller {
 
     private final RetryScheduleRepository retries;
     private final EventReplayer replayer;
-    private final ReplayCircuitBreaker breaker;
+    private final StreamRegistry streams;
     private final AuditLog audit;
     private final TransactionTemplate tx;
     private final ObservationRegistry observations;
@@ -45,12 +48,12 @@ public class RetryPoller {
     private final Clock clock;
     private final int batchSize;
 
-    public RetryPoller(RetryScheduleRepository retries, EventReplayer replayer, ReplayCircuitBreaker breaker,
+    public RetryPoller(RetryScheduleRepository retries, EventReplayer replayer, StreamRegistry streams,
                        AuditLog audit, TransactionTemplate tx, ObservationRegistry observations, TraceContext trace,
                        Clock clock, DlqAgentProperties props) {
         this.retries = retries;
         this.replayer = replayer;
-        this.breaker = breaker;
+        this.streams = streams;
         this.audit = audit;
         this.tx = tx;
         this.observations = observations;
@@ -74,19 +77,23 @@ public class RetryPoller {
     /** @return how many events were replayed */
     public int pollOnce() {
         int sent = 0;
-        while (sent < batchSize && Boolean.TRUE.equals(tx.execute(this::replayNextDue))) {
-            sent++;
+        for (HealingStream stream : streams.all()) {
+            int forStream = 0;
+            while (forStream < batchSize && Boolean.TRUE.equals(tx.execute(status -> replayNextDue(stream, status)))) {
+                forStream++;
+            }
+            sent += forStream;
         }
         return sent;
     }
 
-    private boolean replayNextDue(TransactionStatus status) {
+    private boolean replayNextDue(HealingStream stream, TransactionStatus status) {
         long started = System.nanoTime();
-        Optional<RetryEntry> due = retries.lockNextDue(clock.instant());
+        Optional<RetryEntry> due = retries.lockNextDue(clock.instant(), stream.name(), stream.sourceTopic());
         if (due.isEmpty()) {
             return false;
         }
-        if (!breaker.tryAcquire()) {
+        if (!stream.breaker().tryAcquire()) {
             // Open breaker: leave the row due; it goes out once the breaker lets replays through again.
             status.setRollbackOnly();
             return false;
@@ -96,6 +103,7 @@ public class RetryPoller {
         try {
             Observation.createNotStarted("dlq.retry", observations)
                     .lowCardinalityKeyValue("topic", row.targetTopic())
+                    .lowCardinalityKeyValue("stream", row.stream())
                     .highCardinalityKeyValue("correlation.id", row.correlationId())
                     .highCardinalityKeyValue("retry.attempt", Integer.toString(replayNumber))
                     .observe(() -> {
@@ -104,7 +112,7 @@ public class RetryPoller {
                         audit.record(auditEntry(row, replayNumber, started));
                     });
         } catch (RuntimeException e) {
-            breaker.abandon();
+            stream.breaker().abandon();
             throw e;
         }
         return true;
@@ -112,7 +120,7 @@ public class RetryPoller {
 
     private AuditEntry auditEntry(RetryEntry row, int replayNumber, long startedNanos) {
         return new AuditEntry(
-                AuditEntry.idForRetry(row.id(), replayNumber), row.lastEventId(), row.correlationId(),
+                AuditEntry.idForRetry(row.id(), replayNumber), row.lastEventId(), row.stream(), row.correlationId(),
                 trace.traceId(), Instant.now(), AuditEntry.Stage.RETRY, row.targetTopic(), row.key(),
                 RemediationStrategy.TRANSIENT, null, row.lastError(), null, null, List.of(), List.of(), List.of(),
                 AuditEntry.Tier.NONE, AuditEntry.Outcome.RETRY_REPLAYED,

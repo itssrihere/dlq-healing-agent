@@ -24,6 +24,7 @@ import com.example.dlqagent.observability.TraceContext;
 import com.example.dlqagent.retry.RetryScheduler;
 import com.example.dlqagent.support.MainTopicReader;
 import com.example.dlqagent.support.ScriptedChatModel;
+import com.example.dlqagent.support.TestStreams;
 import io.micrometer.observation.ObservationRegistry;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
@@ -219,7 +220,7 @@ class AuditFlowIT extends AbstractIntegrationTest {
     @Test
     void hostilePayloadContentWithNulCharactersCannotBreakTheAuditWrite() {
         UUID eventId = UUID.randomUUID();
-        var entry = new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.TRIAGE), eventId, "cid-nul-" + eventId,
+        var entry = new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.TRIAGE), eventId, "orders", "cid-nul-" + eventId,
                 null, Instant.now(), AuditEntry.Stage.TRIAGE, "orders-topic", "k\u0000", RemediationStrategy.SCHEMA_DRIFT,
                 0.5, "rationale\u0000text", "summary", 0.5, List.of(),
                 List.of(new FieldChange("f\u0000", "before\u0000", "after")), List.of("flag\u0000"),
@@ -237,7 +238,7 @@ class AuditFlowIT extends AbstractIntegrationTest {
     @Test
     void recordingTheSameEntryTwiceWritesOneRow() {
         UUID eventId = UUID.randomUUID();
-        var entry = new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.TRIAGE), eventId, "cid-dup-" + eventId,
+        var entry = new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.TRIAGE), eventId, "orders", "cid-dup-" + eventId,
                 null, Instant.now(), AuditEntry.Stage.TRIAGE, "orders-topic", null, RemediationStrategy.POISON_PILL,
                 null, null, null, null, List.of(), List.of(), List.of(), AuditEntry.Tier.NONE,
                 AuditEntry.Outcome.QUARANTINED, "r", "agent", 1);
@@ -261,12 +262,12 @@ class AuditFlowIT extends AbstractIntegrationTest {
         };
         var service = new DlqTriageService(
                 c -> new RemediationPlan.Quarantine("poison"), c -> new RepairResult.Unrepairable("unused"),
-                request -> { }, quarantine, failing, props, ObservationRegistry.NOOP, tx, traceContext,
+                request -> { }, quarantine, failing, ObservationRegistry.NOOP, tx, traceContext,
                 retryScheduler);
-        var ctx = new FailureContext("cid-atomic-" + UUID.randomUUID(), "orders-dlq", 0, System.nanoTime() & 0xFFFFFFF,
+        var ctx = new FailureContext("orders", "cid-atomic-" + UUID.randomUUID(), "orders-dlq", 0, System.nanoTime() & 0xFFFFFFF,
                 "orders-topic", "k", "garbage", Map.of(), null, Instant.now());
 
-        assertThatThrownBy(() -> service.triage(ctx)).hasMessage("audit store down");
+        assertThatThrownBy(() -> service.triage(TestStreams.orders(), ctx)).hasMessage("audit store down");
 
         // A held event without an audit record must be impossible; the listener will retry the whole thing.
         assertThat(quarantine.findById(ctx.eventId())).isEmpty();

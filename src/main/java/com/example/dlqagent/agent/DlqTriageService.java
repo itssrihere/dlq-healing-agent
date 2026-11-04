@@ -15,10 +15,10 @@ import com.example.dlqagent.domain.RepairResult;
 import com.example.dlqagent.domain.RetryDecision;
 import com.example.dlqagent.domain.ReplayRequest;
 import com.example.dlqagent.domain.ToolCallRecord;
-import com.example.dlqagent.infrastructure.DlqAgentProperties;
 import com.example.dlqagent.observability.LogSafe;
 import com.example.dlqagent.observability.TraceContext;
 import com.example.dlqagent.retry.RetryScheduler;
+import com.example.dlqagent.stream.HealingStream;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
@@ -57,11 +57,9 @@ public class DlqTriageService {
     private final TransactionTemplate tx;
     private final TraceContext trace;
     private final RetryScheduler retryScheduler;
-    private final String mainTopic;
-    private final double autoReplayMinConfidence;
 
     public DlqTriageService(RemediationPlanner planner, PayloadRepairer repairer, EventReplayer replayer,
-                            QuarantineRepository quarantine, AuditLog audit, DlqAgentProperties props,
+                            QuarantineRepository quarantine, AuditLog audit,
                             ObservationRegistry observations, TransactionTemplate tx, TraceContext trace,
                             RetryScheduler retryScheduler) {
         this.planner = planner;
@@ -73,13 +71,12 @@ public class DlqTriageService {
         this.tx = tx;
         this.trace = trace;
         this.retryScheduler = retryScheduler;
-        this.mainTopic = props.topics().main();
-        this.autoReplayMinConfidence = props.gate().autoReplayMinConfidence();
     }
 
     /** What has been learned about one event so far; becomes its audit row. */
     private static final class Draft {
         final long startNanos = System.nanoTime();
+        final HealingStream stream;
         Double plannerConfidence;
         String plannerRationale;
         String repairSummary;
@@ -88,11 +85,17 @@ public class DlqTriageService {
         List<FieldChange> changes = List.of();
         AuditEntry.Outcome outcome;
         AuditEntry.Tier tier;
+
+        Draft(HealingStream stream) {
+            this.stream = stream;
+        }
     }
 
-    public void triage(FailureContext ctx) {
-        Draft draft = new Draft();
+    /** Triages one failed event of one stream. The stream decides the source topic, contract, tier policy and budget. */
+    public void triage(HealingStream stream, FailureContext ctx) {
+        Draft draft = new Draft(stream);
         Observation span = Observation.createNotStarted("dlq.triage", observations)
+                .lowCardinalityKeyValue("stream", ctx.stream())
                 .lowCardinalityKeyValue("topic", ctx.originalTopic())
                 .highCardinalityKeyValue("correlation.id", ctx.correlationId())
                 .highCardinalityKeyValue("event.id", ctx.eventId().toString())
@@ -140,13 +143,13 @@ public class DlqTriageService {
      * the same transaction as the audit row.
      */
     private void retryLater(FailureContext ctx, Draft d, RemediationPlan.TransientRetry plan) {
-        if (!mainTopic.equals(ctx.originalTopic())) {
+        if (!d.stream.sourceTopic().equals(ctx.originalTopic())) {
             quarantine(ctx, d, RemediationStrategy.TRANSIENT,
                     "Refusing to retry to unexpected topic '" + ctx.originalTopic() + "'");
             return;
         }
         RetryDecision decision = tx.execute(status -> {
-            RetryDecision made = retryScheduler.recordFailure(ctx, plan.rationale());
+            RetryDecision made = retryScheduler.recordFailure(d.stream, ctx, plan.rationale());
             switch (made) {
                 case RetryDecision.Scheduled s -> audit.record(entry(ctx, d, RemediationStrategy.TRANSIENT,
                         AuditEntry.Tier.NONE, AuditEntry.Outcome.RETRY_SCHEDULED,
@@ -166,8 +169,8 @@ public class DlqTriageService {
     }
 
     private void repair(FailureContext ctx, Draft d) {
-        if (!mainTopic.equals(ctx.originalTopic())) {
-            // The original-topic header is data from the failed event; only replay to the topic we serve.
+        if (!d.stream.sourceTopic().equals(ctx.originalTopic())) {
+            // The original-topic header is data from the failed event; only replay to the stream's own source topic.
             quarantine(ctx, d, RemediationStrategy.SCHEMA_DRIFT,
                     "Refusing to replay to unexpected topic '" + ctx.originalTopic() + "'");
             return;
@@ -185,7 +188,7 @@ public class DlqTriageService {
                 d.repairConfidence = r.confidence();
                 d.toolCalls = r.toolCalls();
                 d.changes = r.changes();
-                List<String> why = tier2Reasons(r);
+                List<String> why = tier2Reasons(d.stream, r);
                 if (why.isEmpty()) {
                     replayer.replay(ReplayRequest.automatic(ctx, r));
                     record(ctx, d, AuditEntry.Tier.TIER_1, AuditEntry.Outcome.REPLAYED, r.summary(), List.of());
@@ -212,11 +215,14 @@ public class DlqTriageService {
      * patch is safe, which the gate and the repair confidence judge. (Mixing them sent the clean text-amount fix to
      * Tier 2 in a real run, because the real planner reported 0.80 for it.)
      */
-    private List<String> tier2Reasons(RepairResult.Repaired repaired) {
+    private static List<String> tier2Reasons(HealingStream stream, RepairResult.Repaired repaired) {
         List<String> why = new ArrayList<>(repaired.riskFlags());
-        if (repaired.confidence() < autoReplayMinConfidence) {
+        if (!stream.autoReplay()) {
+            why.add("auto-replay is switched off for stream '" + stream.name() + "'");
+        }
+        if (repaired.confidence() < stream.autoReplayMinConfidence()) {
             why.add("repair confidence %.2f is below the auto-replay threshold %.2f"
-                    .formatted(repaired.confidence(), autoReplayMinConfidence));
+                    .formatted(repaired.confidence(), stream.autoReplayMinConfidence()));
         }
         return why;
     }
@@ -274,7 +280,7 @@ public class DlqTriageService {
         d.tier = tier;
         d.outcome = outcome;
         return new AuditEntry(
-                AuditEntry.idFor(ctx.eventId(), AuditEntry.Stage.TRIAGE), ctx.eventId(), ctx.correlationId(),
+                AuditEntry.idFor(ctx.eventId(), AuditEntry.Stage.TRIAGE), ctx.eventId(), ctx.stream(), ctx.correlationId(),
                 trace.traceId(), Instant.now(), AuditEntry.Stage.TRIAGE, ctx.originalTopic(), ctx.key(), strategy,
                 d.plannerConfidence, d.plannerRationale, d.repairSummary, d.repairConfidence, d.toolCalls, d.changes,
                 flags, tier, outcome, reason, AGENT, (System.nanoTime() - d.startNanos) / 1_000_000);

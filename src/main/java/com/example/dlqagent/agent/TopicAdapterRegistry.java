@@ -13,6 +13,11 @@ public final class TopicAdapterRegistry {
 
     private final Map<String, TopicAdapter> byTopic = new HashMap<>();
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public TopicAdapterRegistry(com.example.dlqagent.stream.StreamRegistry streams) {
+        this(streams.all().stream().map(com.example.dlqagent.stream.HealingStream::adapter).toList());
+    }
+
     public TopicAdapterRegistry(List<TopicAdapter> adapters) {
         for (TopicAdapter adapter : adapters) {
             if (byTopic.put(adapter.topic(), adapter) != null) {

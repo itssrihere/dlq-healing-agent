@@ -11,6 +11,7 @@ import java.util.UUID;
  */
 public record QuarantineRecord(
         UUID id,
+        String stream,
         String correlationId,
         String originalTopic,
         String key,
@@ -35,7 +36,7 @@ public record QuarantineRecord(
 
     public static QuarantineRecord pending(FailureContext ctx, RemediationStrategy strategy, String reason) {
         return new QuarantineRecord(
-                ctx.eventId(), ctx.correlationId(), ctx.originalTopic(), ctx.key(), ctx.payload(), ctx.headers(),
+                ctx.eventId(), ctx.stream(), ctx.correlationId(), ctx.originalTopic(), ctx.key(), ctx.payload(), ctx.headers(),
                 ctx.stackTrace(), strategy, reason == null || reason.isBlank() ? "no reason given" : reason,
                 QuarantineStatus.PENDING_REVIEW, Instant.now(), null, null, List.of(), null, null, null);
     }
@@ -43,7 +44,7 @@ public record QuarantineRecord(
     /** Tier 2: a repair that passed the hard checks but needs a human to accept it. */
     public static QuarantineRecord awaitingApproval(FailureContext ctx, RepairResult.Repaired repaired, String reason) {
         return new QuarantineRecord(
-                ctx.eventId(), ctx.correlationId(), ctx.originalTopic(), ctx.key(), ctx.payload(), ctx.headers(),
+                ctx.eventId(), ctx.stream(), ctx.correlationId(), ctx.originalTopic(), ctx.key(), ctx.payload(), ctx.headers(),
                 ctx.stackTrace(), RemediationStrategy.SCHEMA_DRIFT, reason, QuarantineStatus.PENDING_HUMAN_APPROVAL,
                 Instant.now(), repaired.payload(), repaired.summary(), repaired.riskFlags(), null, null, null);
     }

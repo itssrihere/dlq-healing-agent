@@ -17,7 +17,9 @@ class ContractToolsTest {
     private final SchemaInspector inspector = mock(SchemaInspector.class);
     private final ContractTools tools = new ContractTools(inspector,
             new SchemaDrivenTopicAdapter("orders-topic",
-                    new SchemaContract(OrdersContract.schema(), OrdersContract.policy(), OrdersContract.CLOCK), inspector));
+                    new SchemaContract(OrdersContract.schema(), OrdersContract.policy(), OrdersContract.CLOCK), inspector,
+                    java.util.Set.of("orders")),
+            java.util.Set.of("orders"));
 
     @Test
     void exposesExactlyTwoReadOnlyTools() {

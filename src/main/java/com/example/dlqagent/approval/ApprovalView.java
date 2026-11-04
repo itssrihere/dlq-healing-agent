@@ -10,6 +10,7 @@ import java.util.UUID;
 /** What a reviewer sees: the original, the proposal, a field-level diff and why a human is needed. */
 record ApprovalView(
         UUID id,
+        String stream,
         String correlationId,
         String status,
         String originalTopic,
@@ -26,7 +27,7 @@ record ApprovalView(
         String reviewNotes) {
 
     static ApprovalView of(QuarantineRecord r) {
-        return new ApprovalView(r.id(), r.correlationId(), r.status().name(), r.originalTopic(), r.key(), r.reason(),
+        return new ApprovalView(r.id(), r.stream(), r.correlationId(), r.status().name(), r.originalTopic(), r.key(), r.reason(),
                 r.riskFlags(), r.repairSummary(), r.payload(), r.proposedPayload(),
                 r.proposedPayload() == null ? List.of() : JsonDiff.diffOrEmpty(r.payload(), r.proposedPayload()),
                 r.createdAt(), r.reviewedBy(), r.reviewedAt(), r.reviewNotes());

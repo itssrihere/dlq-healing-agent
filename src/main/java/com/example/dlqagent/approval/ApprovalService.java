@@ -1,6 +1,7 @@
 package com.example.dlqagent.approval;
 
-import com.example.dlqagent.agent.TopicAdapterRegistry;
+import com.example.dlqagent.stream.HealingStream;
+import com.example.dlqagent.stream.StreamRegistry;
 import com.example.dlqagent.domain.AuditEntry;
 import com.example.dlqagent.domain.AuditLog;
 import com.example.dlqagent.domain.Evaluation;
@@ -36,16 +37,16 @@ public class ApprovalService {
     private static final int MAX_LIMIT = 100;
 
     private final QuarantineRepository repository;
-    private final TopicAdapterRegistry adapters;
+    private final StreamRegistry streams;
     private final EventReplayer replayer;
     private final AuditLog audit;
     private final TraceContext trace;
     private final ObservationRegistry observations;
 
-    ApprovalService(QuarantineRepository repository, TopicAdapterRegistry adapters, EventReplayer replayer,
+    ApprovalService(QuarantineRepository repository, StreamRegistry streams, EventReplayer replayer,
                     AuditLog audit, TraceContext trace, ObservationRegistry observations) {
         this.repository = repository;
-        this.adapters = adapters;
+        this.streams = streams;
         this.replayer = replayer;
         this.audit = audit;
         this.trace = trace;
@@ -53,8 +54,8 @@ public class ApprovalService {
     }
 
     @Transactional(readOnly = true)
-    public List<QuarantineRecord> list(QuarantineStatus status, int limit) {
-        return repository.findByStatus(status, Math.max(1, Math.min(limit, MAX_LIMIT)));
+    public List<QuarantineRecord> list(QuarantineStatus status, String stream, int limit) {
+        return repository.findByStatus(status, stream, Math.max(1, Math.min(limit, MAX_LIMIT)));
     }
 
     @Transactional(readOnly = true)
@@ -76,8 +77,14 @@ public class ApprovalService {
     private QuarantineRecord doApprove(UUID id, String reviewer, String notes) {
         long start = System.nanoTime();
         QuarantineRecord rec = lockPending(id);
-        TopicAdapter adapter = adapters.forTopic(rec.originalTopic()).orElseThrow(
-                () -> new ApprovalConflictException("No topic adapter for '" + rec.originalTopic() + "'"));
+        HealingStream stream = streams.byName(rec.stream()).orElseThrow(
+                () -> new ApprovalConflictException("Stream '" + rec.stream() + "' is not configured"));
+        if (!stream.sourceTopic().equals(rec.originalTopic())) {
+            // Config changed since the proposal was held; never replay to a topic the stream no longer serves.
+            throw new ApprovalConflictException("Stream '" + stream.name() + "' serves '" + stream.sourceTopic()
+                    + "', not '" + rec.originalTopic() + "'");
+        }
+        TopicAdapter adapter = stream.adapter();
         Evaluation evaluation = adapter.evaluate(rec.payload(), rec.proposedPayload(), rec.key());
         if (evaluation.rejected()) {
             throw new ApprovalConflictException(
@@ -122,7 +129,7 @@ public class ApprovalService {
         UUID eventId = rec.id(); // the quarantine row id is the DLQ record identity
         String reason = (outcome == AuditEntry.Outcome.REJECTED ? "Rejected" : "Approved") + " by " + reviewer
                 + (notes == null || notes.isBlank() ? "" : ": " + notes);
-        return new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.APPROVAL), eventId, rec.correlationId(),
+        return new AuditEntry(AuditEntry.idFor(eventId, AuditEntry.Stage.APPROVAL), eventId, rec.stream(), rec.correlationId(),
                 trace.traceId(), Instant.now(), AuditEntry.Stage.APPROVAL, rec.originalTopic(), rec.key(),
                 rec.strategy(), null, null, rec.repairSummary(), null, List.of(),
                 JsonDiff.diffOrEmpty(rec.payload(), rec.proposedPayload()), rec.riskFlags(), AuditEntry.Tier.TIER_2,

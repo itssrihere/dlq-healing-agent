@@ -5,6 +5,7 @@ import com.example.dlqagent.domain.RetryDecision;
 import com.example.dlqagent.domain.RetryEntry;
 import com.example.dlqagent.domain.RetryScheduleRepository;
 import com.example.dlqagent.infrastructure.DlqAgentProperties;
+import com.example.dlqagent.stream.HealingStream;
 import java.time.Clock;
 import java.time.Instant;
 import org.springframework.stereotype.Service;
@@ -20,21 +21,18 @@ import org.springframework.stereotype.Service;
 public class RetryScheduler {
 
     private final RetryScheduleRepository retries;
-    private final ReplayCircuitBreaker breaker;
     private final Backoff backoff;
     private final Clock clock;
-    private final int maxAttempts;
 
-    public RetryScheduler(RetryScheduleRepository retries, ReplayCircuitBreaker breaker, DlqAgentProperties props,
-                          Clock clock) {
+    /** The backoff curve is shared; the attempt budget and the circuit breaker belong to the stream. */
+    public RetryScheduler(RetryScheduleRepository retries, DlqAgentProperties props, Clock clock) {
         this.retries = retries;
-        this.breaker = breaker;
         this.backoff = new Backoff(props.retry());
         this.clock = clock;
-        this.maxAttempts = props.retry().maxAttempts();
     }
 
-    public RetryDecision recordFailure(FailureContext ctx, String reason) {
+    public RetryDecision recordFailure(HealingStream stream, FailureContext ctx, String reason) {
+        int maxAttempts = stream.maxAttempts();
         String fingerprint = RetryFingerprint.of(ctx.originalTopic(), ctx.key(), ctx.payload());
         Instant now = clock.instant();
 
@@ -55,12 +53,14 @@ public class RetryScheduler {
             // Another DLQ record with identical content while a replay is already pending: one replay covers both.
             case SCHEDULED -> new RetryDecision.Scheduled(row.attempt() + 1, maxAttempts, row.nextAttemptAt(), true);
             case EXHAUSTED -> new RetryDecision.Exhausted("Retries for this event were already exhausted");
-            case REPLAYED -> afterFailedReplay(row, ctx, reason, now);
+            case REPLAYED -> afterFailedReplay(stream, row, ctx, reason, now);
         };
     }
 
-    private RetryDecision afterFailedReplay(RetryEntry row, FailureContext ctx, String reason, Instant now) {
-        breaker.recordRetryFailure();
+    private RetryDecision afterFailedReplay(HealingStream stream, RetryEntry row, FailureContext ctx, String reason,
+                                            Instant now) {
+        int maxAttempts = stream.maxAttempts();
+        stream.breaker().recordRetryFailure();
         if (row.attempt() >= maxAttempts) {
             retries.markExhausted(row.id(), ctx.eventId(), reason);
             return new RetryDecision.Exhausted(

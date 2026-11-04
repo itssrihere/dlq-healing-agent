@@ -19,7 +19,7 @@ class ImmutabilityTest {
     void quarantineRecordCopiesItsHeadersAndFlags() {
         Map<String, String> headers = new HashMap<>(Map.of("a", "1"));
         List<String> flags = new ArrayList<>(List.of("f"));
-        var r = new QuarantineRecord(UUID.randomUUID(), "c", "t", "k", "p", headers, null, RemediationStrategy.POISON_PILL,
+        var r = new QuarantineRecord(UUID.randomUUID(), "orders", "c", "t", "k", "p", headers, null, RemediationStrategy.POISON_PILL,
                 "r", QuarantineStatus.PENDING_REVIEW, Instant.now(), null, null, flags, null, null, null);
 
         headers.put("b", "2");

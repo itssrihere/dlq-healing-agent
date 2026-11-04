@@ -33,7 +33,7 @@ class LivePlannerEvalIT extends AbstractIntegrationTest {
     }
 
     private static FailureContext failure(String payload, String stackTrace) {
-        return new FailureContext("eval-1", "orders-dlq", 0, 1L, "orders-topic", "k", payload, Map.of(), stackTrace,
+        return new FailureContext("orders", "eval-1", "orders-dlq", 0, 1L, "orders-topic", "k", payload, Map.of(), stackTrace,
                 Instant.now());
     }
 
@@ -70,7 +70,7 @@ class LivePlannerEvalIT extends AbstractIntegrationTest {
     // ---- Strategy A repair agent: exercises the real tool-calling loop, which the stub model cannot ----------
 
     private static FailureContext order(String payload) {
-        return new FailureContext("eval-2", "orders-dlq", 0, 1L, "orders-topic", "o-1", payload, Map.of(),
+        return new FailureContext("orders", "eval-2", "orders-dlq", 0, 1L, "orders-topic", "o-1", payload, Map.of(),
                 "ConstraintViolation: amount must be numeric", Instant.now());
     }
 

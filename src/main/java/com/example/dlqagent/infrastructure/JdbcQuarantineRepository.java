@@ -23,7 +23,7 @@ import org.springframework.stereotype.Repository;
 class JdbcQuarantineRepository implements QuarantineRepository {
 
     private static final String COLUMNS = """
-            id, correlation_id, original_topic, kafka_key, payload, headers, stack_trace, strategy, reason, status,
+            id, stream, correlation_id, original_topic, kafka_key, payload, headers, stack_trace, strategy, reason, status,
             created_at, proposed_payload, repair_summary, risk_flags, reviewed_by, reviewed_at, review_notes""";
 
     private final JdbcClient jdbc;
@@ -38,16 +38,17 @@ class JdbcQuarantineRepository implements QuarantineRepository {
     public boolean save(QuarantineRecord r) {
         int rows = jdbc.sql("""
                 INSERT INTO quarantine_event
-                    (id, correlation_id, original_topic, kafka_key, payload, headers,
+                    (id, stream, correlation_id, original_topic, kafka_key, payload, headers,
                      stack_trace, strategy, reason, status, created_at,
                      proposed_payload, repair_summary, risk_flags)
                 VALUES
-                    (:id, :correlationId, :originalTopic, :key, :payload, CAST(:headers AS jsonb),
+                    (:id, :stream, :correlationId, :originalTopic, :key, :payload, CAST(:headers AS jsonb),
                      :stackTrace, :strategy, :reason, :status, :createdAt,
                      :proposedPayload, :repairSummary, CAST(:riskFlags AS jsonb))
                 ON CONFLICT (id) DO NOTHING
                 """)
                 .param("id", r.id())
+                .param("stream", r.stream())
                 .param("correlationId", r.correlationId())
                 .param("originalTopic", r.originalTopic())
                 .param("key", PgText.clean(r.key()))
@@ -78,9 +79,10 @@ class JdbcQuarantineRepository implements QuarantineRepository {
     }
 
     @Override
-    public List<QuarantineRecord> findByStatus(QuarantineStatus status, int limit) {
-        return jdbc.sql("SELECT " + COLUMNS + " FROM quarantine_event WHERE status = :s ORDER BY created_at DESC LIMIT :n")
-                .param("s", status.name()).param("n", limit).query(this::map).list();
+    public List<QuarantineRecord> findByStatus(QuarantineStatus status, String stream, int limit) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM quarantine_event WHERE status = :s "
+                        + "AND (CAST(:stream AS TEXT) IS NULL OR stream = :stream) ORDER BY created_at DESC LIMIT :n")
+                .param("s", status.name()).param("stream", stream).param("n", limit).query(this::map).list();
     }
 
     @Override
@@ -98,6 +100,7 @@ class JdbcQuarantineRepository implements QuarantineRepository {
         OffsetDateTime reviewedAt = rs.getObject("reviewed_at", OffsetDateTime.class);
         return new QuarantineRecord(
                 rs.getObject("id", UUID.class),
+                rs.getString("stream"),
                 rs.getString("correlation_id"),
                 rs.getString("original_topic"),
                 rs.getString("kafka_key"),

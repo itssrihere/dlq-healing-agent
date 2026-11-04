@@ -23,8 +23,13 @@ public final class OrdersContract {
     private OrdersContract() {}
 
     public static String schema() {
+        return schemaAt("classpath:contracts/orders.schema.json");
+    }
+
+    /** Reads a {@code classpath:} contract the way the application's own source does. */
+    public static String schemaAt(String location) {
         try {
-            return new ClassPathResource("contracts/orders.schema.json").getContentAsString(StandardCharsets.UTF_8);
+            return new ClassPathResource(location.replaceFirst("^classpath:", "")).getContentAsString(StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
@@ -36,6 +41,6 @@ public final class OrdersContract {
 
     public static SchemaDrivenTopicAdapter adapter() {
         return new SchemaDrivenTopicAdapter("orders-topic", new SchemaContract(schema(), policy(), CLOCK),
-                mock(SchemaInspector.class));
+                mock(SchemaInspector.class), Set.of("orders"));
     }
 }

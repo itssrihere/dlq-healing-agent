@@ -19,8 +19,8 @@ public interface QuarantineRepository {
     /** Loads and row-locks the record until the surrounding transaction ends. Needs an active transaction. */
     Optional<QuarantineRecord> findForUpdate(UUID id);
 
-    /** Newest first. */
-    List<QuarantineRecord> findByStatus(QuarantineStatus status, int limit);
+    /** Newest first. @param stream restricts to one stream, or null for all */
+    List<QuarantineRecord> findByStatus(QuarantineStatus status, String stream, int limit);
 
     /** Records a review decision. @return false if the row does not exist */
     boolean markReviewed(UUID id, QuarantineStatus status, String reviewer, String notes);

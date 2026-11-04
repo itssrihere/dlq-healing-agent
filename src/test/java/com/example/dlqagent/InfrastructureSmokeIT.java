@@ -33,14 +33,14 @@ class InfrastructureSmokeIT extends AbstractIntegrationTest {
         try (AdminClient admin = AdminClient.create(Map.copyOf(kafkaAdmin.getConfigurationProperties()))) {
             Set<String> topics = admin.listTopics().names().get(10, TimeUnit.SECONDS);
 
-            assertThat(topics).contains(props.topics().main(), props.topics().dlq());
+            assertThat(topics).contains(props.streams().get(0).sourceTopic(), props.streams().get(0).dlqTopic());
         }
     }
 
     @Test
     void propertiesBindWithDefaults() {
-        assertThat(props.topics().main()).isEqualTo("orders-topic");
-        assertThat(props.topics().dlq()).isEqualTo("orders-dlq");
+        assertThat(props.streams().get(0).sourceTopic()).isEqualTo("orders-topic");
+        assertThat(props.streams().get(0).dlqTopic()).isEqualTo("orders-dlq");
         assertThat(props.retry().maxAttempts()).isEqualTo(3);
     }
 }

@@ -94,7 +94,7 @@ class QuarantineFlowIT extends AbstractIntegrationTest {
 
     @Test
     void savingTheSameRecordTwiceWritesOneRow() {
-        var rec = new QuarantineRecord(UUID.randomUUID(), "cid-dup", "orders-topic", null, "p", Map.of(),
+        var rec = new QuarantineRecord(UUID.randomUUID(), "orders", "cid-dup", "orders-topic", null, "p", Map.of(),
                 null, RemediationStrategy.POISON_PILL, "r", QuarantineStatus.PENDING_REVIEW, Instant.now(),
                 null, null, java.util.List.of(), null, null, null);
 

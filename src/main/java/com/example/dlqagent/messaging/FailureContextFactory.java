@@ -1,7 +1,7 @@
 package com.example.dlqagent.messaging;
 
 import com.example.dlqagent.domain.FailureContext;
-import com.example.dlqagent.infrastructure.DlqAgentProperties;
+import com.example.dlqagent.stream.HealingStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -18,13 +18,11 @@ public class FailureContextFactory {
 
     private static final Pattern SAFE_CORRELATION_ID = Pattern.compile("[A-Za-z0-9._:-]{1,64}");
 
-    private final String defaultOriginalTopic;
-
-    public FailureContextFactory(DlqAgentProperties props) {
-        this.defaultOriginalTopic = props.topics().main();
-    }
-
-    public FailureContext from(ConsumerRecord<String, String> record) {
+    /**
+     * @param stream the stream this record arrived on; its source topic is the default when the producer set no
+     *               {@code original-topic} header. The header itself is only a claim, checked later against the stream
+     */
+    public FailureContext from(HealingStream stream, ConsumerRecord<String, String> record) {
         // The correlation id ends up in logs, MDC and a bounded column. It comes from a producer, so it is only
         // trusted if it is short and made of harmless characters; otherwise a fresh one is generated.
         String correlationId = headerText(record, DlqHeaders.CORRELATION_ID);
@@ -33,7 +31,7 @@ public class FailureContextFactory {
         }
         String originalTopic = headerText(record, DlqHeaders.ORIGINAL_TOPIC);
         if (originalTopic == null || originalTopic.isBlank()) {
-            originalTopic = defaultOriginalTopic;
+            originalTopic = stream.sourceTopic();
         }
 
         Map<String, String> headers = new LinkedHashMap<>();
@@ -44,6 +42,7 @@ public class FailureContextFactory {
         }
 
         return new FailureContext(
+                stream.name(),
                 correlationId,
                 record.topic(),
                 record.partition(),

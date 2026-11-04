@@ -17,8 +17,11 @@ import com.example.dlqagent.domain.RetryEntry;
 import com.example.dlqagent.domain.RetryScheduleRepository;
 import com.example.dlqagent.domain.RetryStatus;
 import com.example.dlqagent.observability.TraceContext;
+import com.example.dlqagent.stream.StreamRegistry;
 import com.example.dlqagent.support.TestProps;
+import com.example.dlqagent.support.TestStreams;
 import io.micrometer.observation.ObservationRegistry;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -33,6 +36,7 @@ class RetryPollerTest {
     private final RetryScheduleRepository repo = mock(RetryScheduleRepository.class);
     private final EventReplayer replayer = mock(EventReplayer.class);
     private final ReplayCircuitBreaker breaker = mock(ReplayCircuitBreaker.class);
+    private final StreamRegistry streams = mock(StreamRegistry.class);
     private final AuditLog audit = mock(AuditLog.class);
     private final PlatformTransactionManager txManager = mock(PlatformTransactionManager.class);
     private final TransactionStatus txStatus = mock(TransactionStatus.class);
@@ -41,19 +45,20 @@ class RetryPollerTest {
 
     RetryPollerTest() {
         when(txManager.getTransaction(any())).thenReturn(txStatus);
-        poller = new RetryPoller(repo, replayer, breaker, audit, new TransactionTemplate(txManager),
+        when(streams.all()).thenReturn(List.of(TestStreams.orders(breaker)));
+        poller = new RetryPoller(repo, replayer, streams, audit, new TransactionTemplate(txManager),
                 ObservationRegistry.NOOP, new TraceContext(null), clock, TestProps.defaults()); // batch size 10
     }
 
     private RetryEntry due(int attempt) {
-        return new RetryEntry(UUID.randomUUID(), "f", "cid", "orders-topic", "k", "{\"a\":1}",
+        return new RetryEntry(UUID.randomUUID(), "orders", "f", "cid", "orders-topic", "k", "{\"a\":1}",
                 Map.of("tenant", "acme"), attempt, clock.instant(), RetryStatus.SCHEDULED, UUID.randomUUID(), "conn reset");
     }
 
     @Test
     void replaysTheOriginalPayloadUnchangedAndRecordsIt() {
         RetryEntry row = due(1);
-        when(repo.lockNextDue(any())).thenReturn(Optional.of(row), Optional.empty());
+        when(repo.lockNextDue(any(), any(), any())).thenReturn(Optional.of(row), Optional.empty());
         when(breaker.tryAcquire()).thenReturn(true);
 
         assertThat(poller.pollOnce()).isEqualTo(1);
@@ -76,7 +81,7 @@ class RetryPollerTest {
 
     @Test
     void anOpenBreakerLeavesTheRowDueAndRollsTheClaimBack() {
-        when(repo.lockNextDue(any())).thenReturn(Optional.of(due(0)));
+        when(repo.lockNextDue(any(), any(), any())).thenReturn(Optional.of(due(0)));
         when(breaker.tryAcquire()).thenReturn(false);
 
         assertThat(poller.pollOnce()).isZero();
@@ -88,7 +93,7 @@ class RetryPollerTest {
 
     @Test
     void theBreakerIsNotAskedWhenNothingIsDue() {
-        when(repo.lockNextDue(any())).thenReturn(Optional.empty());
+        when(repo.lockNextDue(any(), any(), any())).thenReturn(Optional.empty());
 
         assertThat(poller.pollOnce()).isZero();
 
@@ -97,7 +102,7 @@ class RetryPollerTest {
 
     @Test
     void aBrokerFailureReleasesTheCanaryAndLeavesTheRowUnmarked() {
-        when(repo.lockNextDue(any())).thenReturn(Optional.of(due(0)));
+        when(repo.lockNextDue(any(), any(), any())).thenReturn(Optional.of(due(0)));
         when(breaker.tryAcquire()).thenReturn(true);
         doThrow(new IllegalStateException("broker down")).when(replayer).replay(any());
 
@@ -110,14 +115,14 @@ class RetryPollerTest {
 
     @Test
     void scheduledPollNeverThrows() {
-        when(repo.lockNextDue(any())).thenThrow(new IllegalStateException("db down"));
+        when(repo.lockNextDue(any(), any(), any())).thenThrow(new IllegalStateException("db down"));
 
         poller.poll(); // must not propagate, or the schedule would stop
     }
 
     @Test
     void aBacklogIsSentInBatchesNotAllAtOnce() {
-        when(repo.lockNextDue(any())).thenAnswer(i -> Optional.of(due(0)));
+        when(repo.lockNextDue(any(), any(), any())).thenAnswer(i -> Optional.of(due(0)));
         when(breaker.tryAcquire()).thenReturn(true);
 
         assertThat(poller.pollOnce()).isEqualTo(10); // retry.batch-size

@@ -5,8 +5,13 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
-/** Everything the agent knows about one failed event, extracted from the DLQ record. */
+/**
+ * Everything the agent knows about one failed event, extracted from the DLQ record.
+ *
+ * @param stream the configured stream (DLQ plus source topic) this event arrived on
+ */
 public record FailureContext(
+        String stream,
         String correlationId,
         String dlqTopic,
         int partition,
@@ -19,6 +24,7 @@ public record FailureContext(
         Instant receivedAt) {
 
     public FailureContext {
+        requireText(stream, "stream");
         requireText(correlationId, "correlationId");
         requireText(dlqTopic, "dlqTopic");
         requireText(originalTopic, "originalTopic");

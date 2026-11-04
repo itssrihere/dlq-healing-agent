@@ -8,7 +8,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.SchedulingConfigurer;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
-/** Wires the retry poller to its interval from configuration, and provides the breaker and clock. */
+/** Wires the retry poller to its interval from configuration, and provides the clock. */
 @Configuration
 @EnableScheduling
 class RetryConfiguration implements SchedulingConfigurer {
@@ -25,11 +25,6 @@ class RetryConfiguration implements SchedulingConfigurer {
     @Bean
     static Clock clock() {
         return Clock.systemUTC();
-    }
-
-    @Bean
-    static ReplayCircuitBreaker replayCircuitBreaker(Clock clock, DlqAgentProperties props) {
-        return new ReplayCircuitBreaker(clock, props.retry().breaker());
     }
 
     @Override
