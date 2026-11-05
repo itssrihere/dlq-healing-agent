@@ -32,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -54,6 +55,13 @@ import org.springframework.transaction.support.TransactionTemplate;
  * DLQ_LIVE_LLM=true DLQ_EVAL=true OPENAI_MODEL=gpt-4.1 mvn verify -Dit.test=LabelledEvalIT  # another model
  * DLQ_EVAL_RUNS=1 DLQ_EVAL_FILTER=mechanical ...                                            # a quick smoke run
  * </pre>
+ *
+ * <p>Spring AI retries a failed model call up to 10 times with a delay that is multiplied by 5 each time and never capped,
+ * so a few network errors can stall a run for half an hour. For an evaluation, cap it:
+ * {@code SPRING_AI_RETRY_MAX_ATTEMPTS=3 SPRING_AI_RETRY_BACKOFF_INITIAL_INTERVAL=1s SPRING_AI_RETRY_BACKOFF_MULTIPLIER=2
+ * SPRING_AI_RETRY_BACKOFF_MAX_INTERVAL=10s}. A call that still takes longer than {@code DLQ_EVAL_CALL_TIMEOUT_SECONDS}
+ * (default 240) is scored as an ERROR and the run carries on. Parallelism defaults to 2: four concurrent calls produced
+ * TLS and connection-reset errors on the machine this was written on.
  */
 @ActiveProfiles("live-llm")
 @EnabledIfEnvironmentVariable(named = "DLQ_LIVE_LLM", matches = "true")
@@ -87,7 +95,8 @@ class LabelledEvalIT extends AbstractIntegrationTest {
     @Test
     void evaluate() throws Exception {
         int runs = intEnv("DLQ_EVAL_RUNS", 3);
-        int parallelism = intEnv("DLQ_EVAL_PARALLELISM", 4);
+        int parallelism = intEnv("DLQ_EVAL_PARALLELISM", 2);
+        int callTimeoutSeconds = intEnv("DLQ_EVAL_CALL_TIMEOUT_SECONDS", 240);
         String filter = System.getenv("DLQ_EVAL_FILTER");
         String model = env.getProperty("spring.ai.openai.chat.options.model", "unknown");
         List<EvalCase> cases = EvalDataset.load().stream()
@@ -114,7 +123,9 @@ class LabelledEvalIT extends AbstractIntegrationTest {
 
         System.out.printf("EVAL %s: %d cases x %d runs, parallelism %d%n", model, cases.size(), runs, parallelism);
         ExecutorService pool = Executors.newFixedThreadPool(parallelism);
-        List<Future<Result>> futures = new ArrayList<>();
+        /** A submitted (case, run) and its pending result, so a call that hangs can still be reported. */
+        record Task(EvalCase evalCase, int run, Future<Result> future) {}
+        List<Task> tasks = new ArrayList<>();
         AtomicInteger done = new AtomicInteger();
         int total = cases.size() * runs;
         for (int run = 0; run < runs; run++) {
@@ -122,21 +133,28 @@ class LabelledEvalIT extends AbstractIntegrationTest {
                 EvalCase c = cases.get(i);
                 int r = run;
                 int index = i;
-                futures.add(pool.submit(() -> {
+                tasks.add(new Task(c, r, pool.submit(() -> {
                     Result result = EvalReport.score(c, r, observe(service, stores, captures, c, r, index));
                     int n = done.incrementAndGet();
                     if (n % 25 == 0) {
                         System.out.printf("EVAL progress %d/%d%n", n, total);
                     }
                     return result;
-                }));
+                })));
             }
         }
         List<Result> results = new ArrayList<>();
-        for (Future<Result> f : futures) {
-            results.add(f.get(30, TimeUnit.MINUTES));
+        for (Task t : tasks) {
+            try {
+                results.add(t.future().get(callTimeoutSeconds, TimeUnit.SECONDS));
+            } catch (TimeoutException e) {
+                // a call stuck in the client's own retry/backoff says nothing about the model: count it as an error, keep going
+                t.future().cancel(true);
+                results.add(EvalReport.score(t.evalCase(), t.run(), new Observed(null, "NONE", null, List.of(), null, null,
+                        0, callTimeoutSeconds * 1000L, null, "timed out after " + callTimeoutSeconds + " s (client retry or hang)")));
+            }
         }
-        pool.shutdown();
+        pool.shutdownNow();
         results.sort(Comparator.comparing((Result x) -> x.evalCase().id()).thenComparingInt(Result::run));
 
         String stamp = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
