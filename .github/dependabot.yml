@@ -17,6 +17,10 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "org.springframework.ai:*"
         update-types: ["version-update:semver-major"]
+      # json-schema-validator 3.x is built on Jackson 3 (package tools.jackson); this app is on Jackson 2, so a bump to 3.x
+      # does not compile (SchemaContract). Moving to it means migrating the whole app to Jackson 3: a project, not a PR.
+      - dependency-name: "com.networknt:json-schema-validator"
+        update-types: ["version-update:semver-major"]
   # The container images are referenced from docker-compose.yml (postgres, kafka, jaeger). The "docker" ecosystem
   # only reads Dockerfiles, of which this repo has none, and fails with an error; "docker-compose" is the right one.
   - package-ecosystem: "docker-compose"
