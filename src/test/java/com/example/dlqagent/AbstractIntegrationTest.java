@@ -29,10 +29,10 @@ import org.testcontainers.utility.DockerImageName;
 public abstract class AbstractIntegrationTest {
 
     @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>(ComposeImages.of("postgres"));
+    protected static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>(ComposeImages.of("postgres"));
 
     @ServiceConnection
-    static final KafkaContainer KAFKA = new KafkaContainer(DockerImageName.parse(ComposeImages.of("apache/kafka")));
+    protected static final KafkaContainer KAFKA = new KafkaContainer(DockerImageName.parse(ComposeImages.of("apache/kafka")));
 
     static {
         POSTGRES.start();
