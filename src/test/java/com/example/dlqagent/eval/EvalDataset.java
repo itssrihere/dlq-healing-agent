@@ -18,8 +18,14 @@ public final class EvalDataset {
 
     private EvalDataset() {}
 
+    /** The frozen v1 set. */
     public static List<EvalCase> load() {
-        try (InputStream in = new ClassPathResource("eval/cases.jsonl").getInputStream()) {
+        return load("eval/cases.jsonl");
+    }
+
+    /** @param resource {@code eval/cases.jsonl} (v1) or {@code eval/cases-v2.jsonl} */
+    public static List<EvalCase> load(String resource) {
+        try (InputStream in = new ClassPathResource(resource).getInputStream()) {
             List<EvalCase> cases = new ArrayList<>();
             for (String line : new String(in.readAllBytes(), StandardCharsets.UTF_8).split("\n")) {
                 if (!line.isBlank()) {
@@ -28,7 +34,7 @@ public final class EvalDataset {
             }
             return cases;
         } catch (IOException e) {
-            throw new IllegalStateException("Cannot read eval/cases.jsonl", e);
+            throw new IllegalStateException("Cannot read " + resource, e);
         }
     }
 

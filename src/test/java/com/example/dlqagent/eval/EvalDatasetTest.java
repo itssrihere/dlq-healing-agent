@@ -25,6 +25,7 @@ class EvalDatasetTest {
     private static final Set<String> STRATEGIES = Set.of("SCHEMA_DRIFT", "TRANSIENT", "POISON_PILL");
 
     private final List<EvalCase> cases = EvalDataset.load();
+    private final List<EvalCase> casesV2 = EvalDataset.load("eval/cases-v2.jsonl");
 
     private static StreamRegistry streams() {
         DlqAgentProperties d = TestProps.defaults();
@@ -47,6 +48,33 @@ class EvalDatasetTest {
             assertThat(c.key()).as(c.id()).isNotBlank();
             assertThat(c.stackTrace()).as(c.id()).isNotBlank();
         }
+    }
+
+    @Test
+    void v2IsV1WithOnlyTheMisleadingStackTraceReplacedEverywhereItAppears() {
+        String misleading = "SerializationException: Can't deserialize data [[123, 34, 111]]";
+        assertThat(casesV2).hasSameSizeAs(cases);
+        int replaced = 0;
+        for (int i = 0; i < cases.size(); i++) {
+            EvalCase a = cases.get(i);
+            EvalCase b = casesV2.get(i);
+            // everything the labels depend on is identical: ids, payloads, headers and every expected field
+            assertThat(b.id()).isEqualTo(a.id());
+            assertThat(b.stream()).isEqualTo(a.stream());
+            assertThat(b.category()).isEqualTo(a.category());
+            assertThat(b.key()).isEqualTo(a.key());
+            assertThat(b.payload()).as(a.id()).isEqualTo(a.payload());
+            assertThat(b.headers()).as(a.id()).isEqualTo(a.headers());
+            assertThat(b.originalTopic()).as(a.id()).isEqualTo(a.originalTopic());
+            assertThat(b.expected()).as(a.id()).isEqualTo(a.expected());
+            if (a.stackTrace().contains(misleading)) {
+                replaced++;
+                assertThat(b.stackTrace()).as(a.id()).doesNotContain("SerializationException");
+            } else {
+                assertThat(b.stackTrace()).as(a.id() + " must be untouched").isEqualTo(a.stackTrace());
+            }
+        }
+        assertThat(replaced).as("the template appears in 9 v1 cases, and v2 fixes all of them, not only the ones that failed").isEqualTo(9);
     }
 
     @Test

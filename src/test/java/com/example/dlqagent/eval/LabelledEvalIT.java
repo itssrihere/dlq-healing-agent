@@ -54,6 +54,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * DLQ_LIVE_LLM=true DLQ_EVAL=true mvn verify -Dit.test=LabelledEvalIT                       # the default model, 3 runs
  * DLQ_LIVE_LLM=true DLQ_EVAL=true OPENAI_MODEL=gpt-4.1 mvn verify -Dit.test=LabelledEvalIT  # another model
  * DLQ_EVAL_RUNS=1 DLQ_EVAL_FILTER=mechanical ...                                            # a quick smoke run
+ * DLQ_EVAL_DATASET=v2 ...                                                                    # the corrected inputs (default v1)
  * </pre>
  *
  * <p>Spring AI retries a failed model call up to 10 times with a delay that is multiplied by 5 each time and never capped,
@@ -99,7 +100,8 @@ class LabelledEvalIT extends AbstractIntegrationTest {
         int callTimeoutSeconds = intEnv("DLQ_EVAL_CALL_TIMEOUT_SECONDS", 240);
         String filter = System.getenv("DLQ_EVAL_FILTER");
         String model = env.getProperty("spring.ai.openai.chat.options.model", "unknown");
-        List<EvalCase> cases = EvalDataset.load().stream()
+        String dataset = "v2".equalsIgnoreCase(System.getenv("DLQ_EVAL_DATASET")) ? "v2" : "v1";
+        List<EvalCase> cases = EvalDataset.load("v2".equals(dataset) ? "eval/cases-v2.jsonl" : "eval/cases.jsonl").stream()
                 .filter(c -> filter == null || filter.isBlank() || c.id().contains(filter) || c.category().contains(filter))
                 .toList();
         assertThat(cases).as("no case matches DLQ_EVAL_FILTER").isNotEmpty();
@@ -121,7 +123,7 @@ class LabelledEvalIT extends AbstractIntegrationTest {
                 stores.quarantine, stores.audit, ObservationRegistry.NOOP, tx, trace,
                 new RetryScheduler(stores.retries, props, Clock.systemUTC()));
 
-        System.out.printf("EVAL %s: %d cases x %d runs, parallelism %d%n", model, cases.size(), runs, parallelism);
+        System.out.printf("EVAL %s dataset %s: %d cases x %d runs, parallelism %d%n", model, dataset, cases.size(), runs, parallelism);
         ExecutorService pool = Executors.newFixedThreadPool(parallelism);
         /** A submitted (case, run) and its pending result, so a call that hangs can still be reported. */
         record Task(EvalCase evalCase, int run, Future<Result> future) {}
@@ -160,8 +162,8 @@ class LabelledEvalIT extends AbstractIntegrationTest {
         String stamp = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
         Path dir = Path.of("target", "eval");
         Files.createDirectories(dir);
-        String base = model.replaceAll("[^A-Za-z0-9._-]", "_") + "-" + stamp;
-        String markdown = EvalReport.markdown(model, runs, results);
+        String base = model.replaceAll("[^A-Za-z0-9._-]", "_") + "-" + dataset + "-" + stamp;
+        String markdown = EvalReport.markdown(model + " (dataset " + dataset + ")", runs, results);
         Files.writeString(dir.resolve(base + ".md"), markdown);
         EvalReport.writeJson(dir.resolve(base + ".json"), model, runs, results);
         System.out.println(markdown);
