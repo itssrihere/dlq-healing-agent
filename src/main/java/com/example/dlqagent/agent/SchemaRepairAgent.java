@@ -86,7 +86,7 @@ final class SchemaRepairAgent implements PayloadRepairer {
                             "Repair this failed event.", ctx, maxPayloadChars, maxStackTraceChars)))
                     .toolCallbacks(recording(adapter, toolCalls))
                     .call()
-                    .entity(PatchProposal.class);
+                    .entity(new LenientOutputConverter<>(PatchProposal.class));
         } catch (RuntimeException e) {
             log.warn("Repair agent call failed: {}", LogSafe.clean(e));
             return new RepairResult.Unrepairable("Repair agent call failed: " + e.getClass().getSimpleName(),

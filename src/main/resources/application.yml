@@ -14,6 +14,11 @@ spring:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
       group-id: dlq-healing-agent
+      properties:
+        # A record is handled inside one poll: a planner call, a repair call and up to a few tool round trips, each model
+        # call bounded by the limits below (about 93 s worst case). The 5 minute default would drop the consumer from its
+        # group on a bad day; 10 minutes covers that.
+        max.poll.interval.ms: 600000
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -29,7 +34,22 @@ spring:
       observation-enabled: true   # a span per consumed record, continuing the producer's trace
     template:
       observation-enabled: true   # a span per published record (the replay)
+  http:
+    client:
+      # The model endpoint is the one slow thing a listener thread waits on. Without a read timeout a hung call waits for
+      # ever; the model answers in a few seconds, so 30 s is generous.
+      connect-timeout: 5s
+      read-timeout: 30s
   ai:
+    retry:
+      # Spring AI's defaults are 10 attempts, a 2 s first delay multiplied by 5 each time and no upper limit (2 s, 10 s,
+      # 50 s, 250 s, then about 21 minutes), which can block a stream's listener for far longer than Kafka tolerates.
+      # Worst case now: 3 attempts of 30 s plus 1 s and 2 s of backoff, about 93 s per model call.
+      max-attempts: 3
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 10s
     openai:
       api-key: ${OPENAI_API_KEY:not-set}
       chat:

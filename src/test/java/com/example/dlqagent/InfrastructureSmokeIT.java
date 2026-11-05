@@ -37,6 +37,14 @@ class InfrastructureSmokeIT extends AbstractIntegrationTest {
         }
     }
 
+    @Autowired org.springframework.kafka.core.ConsumerFactory<?, ?> consumerFactory;
+
+    @Test
+    void theConsumersAreGivenTimeForASlowModelCallBeforeKafkaDropsThem() {
+        // one record is planned and repaired inside a single poll; the default of 5 minutes is shorter than the worst case
+        assertThat(consumerFactory.getConfigurationProperties()).containsEntry("max.poll.interval.ms", "600000");
+    }
+
     @Test
     void propertiesBindWithDefaults() {
         assertThat(props.streams().get(0).sourceTopic()).isEqualTo("orders-topic");

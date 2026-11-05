@@ -58,4 +58,12 @@
         <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
     </Match>
 
+    <!-- LenientOutputConverter.convert rethrows the original RuntimeException from the stock binding when the second,
+         tolerant attempt also fails, so the caller sees what the model actually returned. Wrapping it would hide that. -->
+    <Match>
+        <Class name="com.example.dlqagent.agent.LenientOutputConverter"/>
+        <Method name="convert"/>
+        <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+    </Match>
+
 </FindBugsFilter>

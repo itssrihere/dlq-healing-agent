@@ -48,7 +48,7 @@ class SpringAiRemediationPlanner implements RemediationPlanner {
                     .user(u -> u.text("{failure}").param("failure",
                             FailurePrompt.render("Classify this failed event.", ctx, maxPayloadChars, maxStackTraceChars)))
                     .call()
-                    .entity(PlannerDecision.class);
+                    .entity(new LenientOutputConverter<>(PlannerDecision.class));
             return toPlan(decision);
         } catch (RuntimeException e) {
             log.warn("Planner call failed, quarantining: {}", LogSafe.clean(e));

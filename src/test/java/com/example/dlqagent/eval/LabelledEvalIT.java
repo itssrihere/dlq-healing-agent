@@ -57,12 +57,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  * DLQ_EVAL_DATASET=v2 ...                                                                    # the corrected inputs (default v1)
  * </pre>
  *
- * <p>Spring AI retries a failed model call up to 10 times with a delay that is multiplied by 5 each time and never capped,
- * so a few network errors can stall a run for half an hour. For an evaluation, cap it:
- * {@code SPRING_AI_RETRY_MAX_ATTEMPTS=3 SPRING_AI_RETRY_BACKOFF_INITIAL_INTERVAL=1s SPRING_AI_RETRY_BACKOFF_MULTIPLIER=2
- * SPRING_AI_RETRY_BACKOFF_MAX_INTERVAL=10s}. A call that still takes longer than {@code DLQ_EVAL_CALL_TIMEOUT_SECONDS}
- * (default 240) is scored as an ERROR and the run carries on. Parallelism defaults to 2: four concurrent calls produced
- * TLS and connection-reset errors on the machine this was written on.
+ * <p>The model call limits come from application.yml (3 attempts, a 30 s read timeout); the first full run, before those
+ * existed, took 33 minutes because Spring AI's default retry (10 attempts, x5 backoff, no cap) turned a few network errors
+ * into long waits. A call that still takes longer than {@code DLQ_EVAL_CALL_TIMEOUT_SECONDS} (default 240) is scored as an
+ * ERROR and the run carries on. Parallelism defaults to 2: four concurrent calls produced TLS and connection-reset errors
+ * on the machine this was written on.
  */
 @ActiveProfiles("live-llm")
 @EnabledIfEnvironmentVariable(named = "DLQ_LIVE_LLM", matches = "true")
