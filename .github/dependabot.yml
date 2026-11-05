@@ -27,6 +27,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Postgres 18 passes the whole suite (checked 2026-11-05), but Flyway logs that PostgreSQL 18 is newer than it has
+      # tested (latest supported: 17), and nothing here needs a Postgres 18 feature. Revisit when Flyway supports 18.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
   # The workflow actions are pinned to commit SHAs; this bumps the SHA and the version comment together.
   - package-ecosystem: "github-actions"
     directory: "/"
