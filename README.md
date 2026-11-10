@@ -10,10 +10,20 @@ An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It list
 
 Failed Kafka messages land on a dead-letter queue (DLQ). This service reads them, asks an LLM what went wrong, and then either **repairs and replays** the message, **retries** it with backoff, or **quarantines** it for a person. The LLM only *proposes*. Plain code applies the change, a schema-driven gate judges it, and anything resting on a guess waits for human approval.
 
+**What it did with five failed orders** (one real run against `gpt-4o-mini`; the stack traces are hand-written; [full capture](docs/demo/demo-run-2026-11-10.txt), reproducible with [`scripts/demo.sh`](scripts/demo.sh); the model sometimes declines `demo-2` instead, see [that capture](docs/demo/demo-run-2026-11-10-model-declined.txt)):
+
+| Failed order | What was wrong | What the agent did |
+|---|---|---|
+| `demo-1` | the amount arrived as text, `"21.50 USD"` | repaired to `21.5` and replayed automatically (Tier 1) |
+| `demo-2` | the date is `03/04/2025`: 3 April or 4 March? | **held for a human**; approved through the API; replayed with the reviewer's name |
+| `demo-3` | a valid order; the consumer's database was unreachable | retried **unchanged** after a backoff |
+| `demo-4` | truncated JSON | quarantined |
+| `demo-5` | a header claims the event came from another topic | quarantined, never replayed |
+
 - **Three strategies** (schema repair, transient retry, quarantine) and **several DLQs** healed as isolated streams, each with its own contract, retry budget and circuit breaker.
 - **Safety by design:** the model returns typed field edits, never a payload; a deterministic gate rejects wrong data and flags assumptions; two tiers (automatic or human-approved); an append-only audit log; OpenTelemetry traces.
 - **Evidence:** a hand-written, frozen set of 106 labelled failures run on two OpenAI models: **no wrong payload was ever replayed automatically** (which only bounds the true rate below about 2.8%, because the cases are invented and probably easier than real traffic). Failure tests freeze the real Postgres and Kafka mid-flow. It has **not** run on production traffic. See [Labelled evaluation](#labelled-evaluation-phase-8) for the numbers and their limits.
-- **Try it:** `docker compose up -d`, then `export OPENAI_API_KEY=... APPROVAL_PASSWORD=...` and `./mvnw spring-boot:run` (JDK 21; full steps in [Running it](#running-it)).
+- **Try it:** `export OPENAI_API_KEY=... && ./scripts/demo.sh` runs the whole demo above on a throwaway stack (JDK 21 and Docker; about ten model calls, cents). Or start it yourself with `docker compose up -d` and `./mvnw spring-boot:run`; full steps in [Running it](#running-it).
 - Built in AI-assisted sessions, [disclosed below](#ai-assisted-development). MIT licensed.
 
 > **Status: Phases 1–7, 7b (schema-driven contracts) and 7c (several DLQs as independent streams) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
@@ -450,6 +460,11 @@ dlq-healing-agent/
 ├── spotbugs-exclude.xml            reviewed SAST exclusions, each with its reason
 ├── .grype.yaml                     reviewed SCA ignores (unfixable advisories), each with its reason
 ├── scripts/sca.sh                  SBOM (Syft) + vulnerability scan (Grype) via pinned Docker images
+├── scripts/demo.sh                 guided demo on a throwaway stack (real model); see "Run the guided demo"
+├── docs/demo/                      captured demo runs (the model proposed a date; the model declined)
+├── docs/eval/                      reports of the labelled evaluation runs (v1, v2, hardened re-run)
+├── mvnw, .mvn/wrapper/             Maven wrapper (script-only, checksum pinned)
+├── LICENSE                         MIT
 ├── .github/dependabot.yml          weekly dependency update pull requests
 ├── .github/workflows/ci.yml        build, tests and SAST on push and pull request
 ├── .github/workflows/sca.yml       SBOM and vulnerability scan on push, pull request and daily
@@ -560,6 +575,16 @@ export APPROVAL_PASSWORD=choose-something           # needed from Phase 5: passw
 ./mvnw spring-boot:run     # or: mvn spring-boot:run
 ```
 On startup Flyway applies the migrations and the two topics are created if missing. Health: `http://localhost:8080/actuator/health` (the only unauthenticated endpoint).
+
+### Run the guided demo
+```bash
+export OPENAI_API_KEY=sk-...                         # used only for this run, never printed
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)     # macOS; any JDK 21
+./scripts/demo.sh
+```
+It builds the jar, starts its own throwaway Kafka (compose project `dlqdemo`, port 9092) and Postgres (port 55432), runs the agent, sends five failed orders, prints what the agent decided and what reached `orders-topic`, acts as the human reviewer for the one it held, and removes everything again, also if a step fails. It needs a free port 9092 and `python3` and `curl`; `DEMO_DB_PORT` and `DEMO_APP_PORT` change the other two ports. The captured run is in [`docs/demo/demo-run-2026-11-10.txt`](docs/demo/demo-run-2026-11-10.txt).
+
+Two honest notes about that capture. It is **one run**, and the model's choices vary: in the four runs I made, it proposed a date for `demo-2` twice and declined twice. A decline is also a safe outcome (the event goes to quarantine for a person); the script handles both, and [that capture](docs/demo/demo-run-2026-11-10-model-declined.txt) is committed too. And look at `demo-2`: the model's own summary calls the input `MM/DD/YYYY`, yet the value it wrote is 3 April, which is day first. That contradiction is exactly why the gate flags an ambiguous date and a person decides, instead of trusting the model's confidence.
 
 ### Try it manually
 With the app and `docker compose` running, publish a fake failed event to the DLQ and look at the quarantine table:

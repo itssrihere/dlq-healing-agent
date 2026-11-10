@@ -1,0 +1,65 @@
+DLQ Healing Agent: demo run capture (the model proposed a date, a human approved it)
+Command    : ./scripts/demo.sh
+Captured   : 2026-11-10 on macOS, JDK 21, Docker (a throwaway Kafka 4.3.1 and Postgres 16 started and removed by the script)
+Model      : gpt-4o-mini (OpenAI), temperature 0
+What it is : ONE real run, unedited except that terminal colour codes were removed. The stack traces are hand-written and
+             five events are a demonstration, not an evaluation (the labelled evaluation in the README is the evaluation).
+Variance   : this was one of four runs made that day. The model proposed a date for demo-2 in two of them (this is one)
+             and declined in the other two, which is also a safe outcome: see demo-run-2026-11-10-model-declined.txt.
+Worth a look: the model's summary of demo-2 calls the input MM/DD/YYYY, yet the value it wrote is 3 April (day first).
+             That contradiction is why the gate flags an ambiguous date and a person decides, instead of trusting the model.
+------------------------------------------------------------------------------------------------------------------------
+==> Building the application (tests skipped; the full suite is 'mvn verify')
+    built target/dlq-healing-agent-0.1.0-SNAPSHOT.jar
+
+==> Starting a throwaway Kafka and Postgres
+    Kafka on :9092, Postgres on :55432
+
+==> Starting the agent (model: gpt-4o-mini; one stream: orders-dlq -> orders-topic)
+    healthy at http://localhost:8089
+
+==> Sending five failed orders to orders-dlq
+    1  demo-1  the amount arrived as text: "21.50 USD"
+    2  demo-2  the date is 03/04/2025: 3 April or 4 March?
+    3  demo-3  a valid order; the consumer could not reach its database
+    4  demo-4  truncated JSON
+    5  demo-5  a header claiming the event came from another topic (payments-topic)
+
+==> Waiting for the agent (planner, repair agent, gate, and the retry's backoff)
+
+==> What the agent decided (the audit log, written once per decision)
+  key   |   strategy   |  tier  |      outcome      |                            reason                            
+--------+--------------+--------+-------------------+--------------------------------------------------------------
+ demo-1 | SCHEMA_DRIFT | TIER_1 | REPLAYED          | The amount was provided as a string with currency included. 
+ demo-3 | TRANSIENT    | NONE   | RETRY_SCHEDULED   | Replay 1 of 5 scheduled for 2026-11-10T23:39:31.473347Z
+ demo-4 | POISON_PILL  | NONE   | QUARANTINED       | The payload is malformed with an unexpected end-of-input, in
+ demo-3 | TRANSIENT    | NONE   | RETRY_REPLAYED    | Replayed unchanged (replay 1)
+ demo-2 | SCHEMA_DRIFT | TIER_2 | HELD_FOR_APPROVAL | Awaiting human approval: createdAt '03/04/2025' is ambiguous
+ demo-5 | SCHEMA_DRIFT | NONE   | QUARANTINED       | Refusing to replay to unexpected topic 'payments-topic'
+(6 rows)
+
+
+==> What reached orders-topic (the only thing the agent ever writes back)
+  demo-1: amount=   21.5 createdAt='2025-04-03T10:00:00Z'   x-repaired-by-agent:true
+  demo-3: amount=   9.99 createdAt='2025-04-03T10:00:00Z'   x-retry-attempt:1
+    demo-4 and demo-5 were quarantined: nothing was replayed for them.
+
+==> The human step: the held repair for demo-2, as the reviewer sees it
+  status         : PENDING_HUMAN_APPROVAL
+  why a human    : Awaiting human approval: createdAt '03/04/2025' is ambiguous (day/month order unknown); createdAt reformatted 
+  proposed change: createdAt  "03/04/2025"  ->  "2025-04-03T00:00:00Z"
+  model summary  : The 'createdAt' field was in an incorrect format (MM/DD/YYYY) and needs to be changed to ISO-8601 format (YYYY-MM-DDTHH:MM:SSZ). Changed 'cr
+
+==> Approving it (a JSON body is required; reviewer notes go into the audit log)
+  status: APPROVED_REPLAYED | reviewed by: reviewer | 3 April: confirmed with the sender
+
+==> demo-2 now on orders-topic: replayed after the approval, with the reviewer's name in a header
+  demo-2: amount=   42.5 createdAt='2025-04-03T00:00:00Z'   x-repaired-by-agent:true x-approved-by:reviewer
+  stage   |  key   |      outcome      |  actor   |                       reason                       
+----------+--------+-------------------+----------+----------------------------------------------------
+ TRIAGE   | demo-2 | HELD_FOR_APPROVAL | agent    | Awaiting human approval: createdAt '03/04/2025' is
+ APPROVAL | demo-2 | APPROVED_REPLAYED | reviewer | Approved by reviewer: 3 April: confirmed with the 
+(2 rows)
+
+
+==> Demo finished. Cleaning up the throwaway containers and the application.
