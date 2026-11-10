@@ -35,6 +35,10 @@ jobs:
       - name: Check the Maven wrapper
         run: ./mvnw -B -v
 
+      # The evaluation tables in the README are generated from docs/eval; this fails if someone edits a table or a report by hand.
+      - name: Check the README evaluation tables
+        run: python3 scripts/eval_tables.py --check
+
       - name: Build, test and run static analysis
         run: mvn -B verify
 

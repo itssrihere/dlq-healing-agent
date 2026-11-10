@@ -1,0 +1,6 @@
+# Line endings that must not change on checkout: the evaluation datasets are hashed (EvalFreezeTest) and the Maven wrapper
+# script must run as a shell script. Everything else is left to git's defaults.
+src/test/resources/eval/*.jsonl text eol=lf
+*.sh text eol=lf
+mvnw text eol=lf
+mvnw.cmd text eol=crlf

@@ -54,7 +54,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * DLQ_LIVE_LLM=true DLQ_EVAL=true mvn verify -Dit.test=LabelledEvalIT                       # the default model, 3 runs
  * DLQ_LIVE_LLM=true DLQ_EVAL=true OPENAI_MODEL=gpt-4.1 mvn verify -Dit.test=LabelledEvalIT  # another model
  * DLQ_EVAL_RUNS=1 DLQ_EVAL_FILTER=mechanical ...                                            # a quick smoke run
- * DLQ_EVAL_DATASET=v2 ...                                                                    # the corrected inputs (default v1)
+ * DLQ_EVAL_DATASET=v2 ...                                                                    # a later dataset version (default v1)
  * </pre>
  *
  * <p>The model call limits come from application.yml (3 attempts, a 30 s read timeout); the first full run, before those
@@ -99,8 +99,11 @@ class LabelledEvalIT extends AbstractIntegrationTest {
         int callTimeoutSeconds = intEnv("DLQ_EVAL_CALL_TIMEOUT_SECONDS", 240);
         String filter = System.getenv("DLQ_EVAL_FILTER");
         String model = env.getProperty("spring.ai.openai.chat.options.model", "unknown");
-        String dataset = "v2".equalsIgnoreCase(System.getenv("DLQ_EVAL_DATASET")) ? "v2" : "v1";
-        List<EvalCase> cases = EvalDataset.load("v2".equals(dataset) ? "eval/cases-v2.jsonl" : "eval/cases.jsonl").stream()
+        String requested = System.getenv("DLQ_EVAL_DATASET");
+        String dataset = requested == null || requested.isBlank() ? "v1" : requested.trim().toLowerCase();
+        assertThat(dataset).as("DLQ_EVAL_DATASET must look like v1, v2, v3 ...").matches("v\\d+");
+        // v1 is the original file name; every later version is cases-vN.jsonl
+        List<EvalCase> cases = EvalDataset.load("v1".equals(dataset) ? "eval/cases.jsonl" : "eval/cases-" + dataset + ".jsonl").stream()
                 .filter(c -> filter == null || filter.isBlank() || c.id().contains(filter) || c.category().contains(filter))
                 .toList();
         assertThat(cases).as("no case matches DLQ_EVAL_FILTER").isNotEmpty();

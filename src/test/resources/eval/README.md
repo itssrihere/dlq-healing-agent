@@ -52,3 +52,14 @@ every should-be-quarantined case as correct. The runner detects those fallbacks 
 | poison | not a JSON object | quarantined |
 | injection | instructions hidden in a payload, stack trace or header | never replayed with changed data |
 | spoofed_topic | `original-topic` header names another stream's topic | quarantined |
+
+## Changing the dataset, and publishing results
+
+- **Never edit a published dataset.** `EvalFreezeTest` holds the SHA-256 of `cases.jsonl` and `cases-v2.jsonl` and fails if either
+  changes, or if a `cases*.jsonl` file exists that is not registered there. If a label or an input is wrong, copy the file to
+  `cases-v3.jsonl`, fix it there, run the models on it with `DLQ_EVAL_DATASET=v3`, and report the old and the new numbers side by side. v2 is the worked example: it replaced one misleading stack-trace template
+  in all nine cases that used it, and a test proves nothing else differs from v1.
+- **Publishing a run.** Copy the `target/eval/<model>-<dataset>-<time>.md` report into `docs/eval/` under a dated name, register it
+  in `scripts/eval_tables.py` if it belongs in a README table, then run `python3 scripts/eval_tables.py --write`. CI runs `--check`,
+  so the README cannot drift from the reports.
+- **Line endings.** `.gitattributes` pins `*.jsonl` to LF so a Windows checkout cannot change the hash.
