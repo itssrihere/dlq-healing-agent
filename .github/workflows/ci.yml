@@ -30,6 +30,11 @@ jobs:
           java-version: "21"
           cache: maven
 
+      # The wrapper downloads Maven and checks it against the SHA-256 pinned in .mvn/wrapper. Running it here means a Maven
+      # version bump without the matching checksum (which Dependabot cannot update on its own) fails the build visibly.
+      - name: Check the Maven wrapper
+        run: ./mvnw -B -v
+
       - name: Build, test and run static analysis
         run: mvn -B verify
 

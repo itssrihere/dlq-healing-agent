@@ -1,6 +1,20 @@
 # DLQ Healing Agent
 
+[![CI](https://github.com/itssrihere/dlq-healing-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/itssrihere/dlq-healing-agent/actions/workflows/ci.yml)
+[![SCA](https://github.com/itssrihere/dlq-healing-agent/actions/workflows/sca.yml/badge.svg)](https://github.com/itssrihere/dlq-healing-agent/actions/workflows/sca.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It listens to a DLQ, uses an LLM-driven *Remediation Planner* to decide what to do with each failed event, and then repairs and replays it, retries it later, or quarantines it for a human.
+
+## In short
+
+Failed Kafka messages land on a dead-letter queue (DLQ). This service reads them, asks an LLM what went wrong, and then either **repairs and replays** the message, **retries** it with backoff, or **quarantines** it for a person. The LLM only *proposes*. Plain code applies the change, a schema-driven gate judges it, and anything resting on a guess waits for human approval.
+
+- **Three strategies** (schema repair, transient retry, quarantine) and **several DLQs** healed as isolated streams, each with its own contract, retry budget and circuit breaker.
+- **Safety by design:** the model returns typed field edits, never a payload; a deterministic gate rejects wrong data and flags assumptions; two tiers (automatic or human-approved); an append-only audit log; OpenTelemetry traces.
+- **Evidence:** a hand-written, frozen set of 106 labelled failures run on two OpenAI models: **no wrong payload was ever replayed automatically** (which only bounds the true rate below about 2.8%, because the cases are invented and probably easier than real traffic). Failure tests freeze the real Postgres and Kafka mid-flow. It has **not** run on production traffic. See [Labelled evaluation](#labelled-evaluation-phase-8) for the numbers and their limits.
+- **Try it:** `docker compose up -d`, then `export OPENAI_API_KEY=... APPROVAL_PASSWORD=...` and `./mvnw spring-boot:run` (JDK 21; full steps in [Running it](#running-it)).
+- Built in AI-assisted sessions, [disclosed below](#ai-assisted-development). MIT licensed.
 
 > **Status: Phases 1–7, 7b (schema-driven contracts) and 7c (several DLQs as independent streams) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
 
@@ -22,6 +36,7 @@ An autonomous **Kafka Dead Letter Queue self-healing and replay agent**. It list
 - [Switching the LLM provider](#switching-the-llm-provider)
 - [Database schema](#database-schema)
 - [Roadmap](#roadmap)
+- [License](#license)
 
 ## AI-assisted development
 This project was built in AI-assisted sessions with Claude Code (Anthropic). The author set the goal, the architecture and the design decisions (for example the topic-adapter boundary, the hard-violation versus risk-flag split, the two-tier approval gate, and what to audit), and the AI wrote most of the code and tests. Because of that, the evidence offered for quality is what can be checked, not who typed it: the automated tests, the live runs against a real model described in [Live LLM evaluation](#live-llm-evaluation-opt-in) and [Real run findings](#real-run-findings), and the known limitations listed throughout this document.
@@ -385,7 +400,7 @@ Choices:
 
 Status and limits, stated plainly:
 - **The workflows have been linted with `actionlint` (clean; a deliberately broken control file was caught) and the script they call was run locally, but they have not yet run on GitHub.** The first push will be their real test, and Testcontainers-in-Actions may need a tweak.
-- A private repository on the free GitHub plan has a monthly Actions-minutes quota, and branch protection (making these checks mandatory before merging) is not available for private repositories on the free plan. The checks run and report, but nothing blocks a merge.
+- While the repository is private on the free GitHub plan, Actions minutes are capped monthly and branch protection (making these checks mandatory before merging) is not available, so the checks run and report but nothing blocks a merge. Both limits lift once it is public.
 - GitHub can switch off scheduled workflows after a long period without repository activity; if the daily scan goes quiet, check the Actions tab.
 
 ## Architecture
@@ -525,7 +540,7 @@ dlq-healing-agent/
 
 ### Prerequisites
 - JDK 21 (the build targets 21 even if a newer JDK is installed; point `JAVA_HOME` at 21)
-- Maven 3.9+
+- Maven 3.9+, or just use the included wrapper, `./mvnw` (script-only; it downloads Maven 3.9.16 and checks the download against a pinned SHA-256)
 - Docker (for local infra and for tests)
 - An OpenAI API key (needed to run the app from Phase 3 onward; not needed for tests)
 
@@ -542,7 +557,7 @@ Troubleshooting:
 export JAVA_HOME=$(/usr/libexec/java_home -v 21)   # macOS
 export OPENAI_API_KEY=sk-...                        # needed from Phase 3 onward
 export APPROVAL_PASSWORD=choose-something           # needed from Phase 5: password of the approval API
-mvn spring-boot:run
+./mvnw spring-boot:run     # or: mvn spring-boot:run
 ```
 On startup Flyway applies the migrations and the two topics are created if missing. Health: `http://localhost:8080/actuator/health` (the only unauthenticated endpoint).
 
@@ -807,4 +822,8 @@ Managed by Flyway (`src/main/resources/db/migration`).
 | 9 (idea) | **Observability tool for the agent.** A read-only `@Tool` (for example `getRecentErrorLogs(correlationId)`) behind a port, with a Jaeger or log-backend adapter, so the model can pull extra evidence about a failure instead of relying only on the stack trace in the DLQ headers. Most useful for diagnosing transient failures in Strategy B. Guardrails: read-only, scoped to one correlation ID, size-capped, and its output treated as untrusted text (log lines can carry attacker-controlled data). Needs a real log or trace backend to query | Backlog |
 | 11 (idea) | **Optional active probes for Strategy B.** Today the breaker only watches whether replayed events come back. An active probe could stop retries earlier. It would be *discovered, not listed*: read from a service registry or catalog (for example an actuator health URL each owning team publishes), so it stays current as services change. The model may propose which dependency looks involved from the stack trace; deterministic code accepts it only if it exists in the registry (the same propose-then-validate pattern as Strategy A), and an unmapped dependency fails closed with an audit entry and a metric so the gap is visible. The probe target must never come from the stack trace itself (SSRF). Needs a real registry to build and test honestly | Backlog |
 | 12 (idea) | **DAST.** An OWASP ZAP baseline and authenticated active scan against the running service (about five HTTP endpoints; the Kafka consumer is out of reach) in a scheduled, non-blocking workflow with a reviewed ignore list. Marginal over the MockMvc security tests, so low priority | Backlog |
-| 10 | **CI.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) written and linted; **first run on GitHub still pending**. Still to do: a status badge once the first run is green, a Maven wrapper (`mvnw`), and a license if the repo is ever made public | In progress |
+| 10 | **CI and repository basics.** `ci.yml` (build, tests, SpotBugs) and `sca.yml` (SBOM and Grype, also daily) run on every push and pull request; status badges, a Maven wrapper with a pinned checksum, and an MIT license are in place | ✅ Done |
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). Copyright (c) 2026 Srikanth Ravindran.
