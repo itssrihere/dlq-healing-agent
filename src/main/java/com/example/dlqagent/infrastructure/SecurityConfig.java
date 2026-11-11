@@ -12,6 +12,7 @@ import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 
 /**
  * Approving a Tier 2 proposal publishes to a production topic, so the review API is authenticated and
@@ -27,16 +28,21 @@ class SecurityConfig {
         http
                 // CSRF tokens are off because this is a stateless Basic-auth API for scripts, not a browser app. Be
                 // aware that a browser can cache Basic credentials and resend them cross-site, so "no cookies" is not
-                // by itself a defence. The defence is that every state-changing endpoint consumes only
-                // application/json: a cross-site HTML form cannot send that content type, and a cross-site fetch with
-                // it needs a CORS preflight, which this service never approves (no CORS configuration exists).
+                // by itself a defence. The defence is StateChangingRequestGuard, added below, which applies to EVERY
+                // request that is not a read: it must be application/json (a cross-site HTML form cannot send that, and a
+                // cross-site fetch with it needs a CORS preflight this service never approves; there is no CORS
+                // configuration) and must not be marked cross-site by the browser (Sec-Fetch-Site). The controllers' own
+                // consumes = application/json is a second layer.
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         .requestMatchers("/api/approvals/**", "/api/audit/**").hasRole(ROLE)
                         .anyRequest().denyAll())
-                .httpBasic(withDefaults());
+                .httpBasic(withDefaults())
+                // After authorisation on purpose: strangers still get a plain 401, and a forged cross-site request,
+                // which arrives with the browser's cached credentials, is stopped here.
+                .addFilterAfter(new StateChangingRequestGuard(), AuthorizationFilter.class);
         return http.build();
     }
 

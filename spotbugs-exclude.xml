@@ -6,8 +6,9 @@
 <FindBugsFilter>
 
     <!-- CSRF tokens are disabled on purpose: stateless Basic-auth API for scripts, not a browser app. The real defence
-         is that every state-changing endpoint requires a JSON body and content type, so a cross-site form or a
-         no-cors fetch cannot reach it. See SecurityConfig and ApprovalFlowIT.stateChangingEndpointsOnlyAcceptJson... -->
+         is StateChangingRequestGuard, applied to every request that is not a read: it must be application/json and must
+         not be marked cross-site by the browser, so a cross-site form or a no-cors fetch cannot reach any endpoint. See
+         SecurityConfig, SecurityChainTest (a deliberately forgetful endpoint) and ApprovalFlowIT. -->
     <Match>
         <Class name="com.example.dlqagent.infrastructure.SecurityConfig"/>
         <Bug pattern="SPRING_CSRF_PROTECTION_DISABLED"/>
@@ -64,6 +65,16 @@
         <Class name="com.example.dlqagent.agent.LenientOutputConverter"/>
         <Method name="convert"/>
         <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+    </Match>
+
+    <!-- Informational: StateChangingRequestGuard exists to read the Content-Type and Sec-Fetch-Site headers, which a client
+         controls. It never trusts them: it only compares them with fixed tokens, and refuses on any mismatch. -->
+    <Match>
+        <Class name="com.example.dlqagent.infrastructure.StateChangingRequestGuard"/>
+        <Or>
+            <Bug pattern="SERVLET_HEADER"/>
+            <Bug pattern="SERVLET_CONTENT_TYPE"/>
+        </Or>
     </Match>
 
 </FindBugsFilter>
