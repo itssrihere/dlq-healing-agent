@@ -26,7 +26,7 @@ Failed Kafka messages land on a dead-letter queue (DLQ). This service reads them
 - **Try it:** `export OPENAI_API_KEY=... && ./scripts/demo.sh` runs the whole demo above on a throwaway stack (JDK 21 and Docker; about ten model calls, cents). Or start it yourself with `docker compose up -d` and `./mvnw spring-boot:run`; full steps in [Running it](#running-it).
 - Built in AI-assisted sessions, [disclosed below](#ai-assisted-development). MIT licensed.
 
-> **Status: Phases 1–7, 7b (schema-driven contracts) and 7c (several DLQs as independent streams) of the build are complete.** All three strategies are built. Strategy A (schema repair) with the two-tier gate, the human approval API, the append-only audit log, distributed tracing and Strategy C (quarantine) have been run for real (real OpenAI model, Kafka, Postgres and Jaeger; see [Real run findings](#real-run-findings)). **Strategy B (transient retry, Phase 7) is tested end to end against real Kafka and Postgres with a *scripted* model, and was run once for real (real OpenAI model, Kafka, Postgres, Jaeger) on a single event; see [Real run findings](#real-run-findings).** Unit and integration tests use a *scripted* model. Sections marked 🚧 describe planned design. This README is updated at the end of every phase.
+> **Status: the build is complete through Phase 8.** All three strategies are built (schema repair with a two-tier gate and a human approval API, transient retry with a circuit breaker, quarantine), several DLQs are healed as isolated streams, and every outcome is audited and traced. They have been run for real against a real OpenAI model, Kafka, Postgres and Jaeger (see [Real run findings](#real-run-findings) and the [guided demo](#run-the-guided-demo)); Strategy B was run for real on a single event. Unit and integration tests use a *scripted* model; a separate, opt-in [labelled evaluation](#labelled-evaluation-phase-8) uses real ones. This README is updated at the end of every phase.
 
 ## Contents
 - [AI-assisted development](#ai-assisted-development)
@@ -162,7 +162,7 @@ The `plan` method never throws; the triage service guards it as well.
 - It sits between delimiter lines containing a random per-request token, so the payload cannot fake the boundary.
 - The system prompt tells the model to treat it as data and to count instructions found in it as evidence for `POISON_PILL`.
 - Payload and stack-trace lengths are capped (`planner.max-payload-chars`, `planner.max-stack-trace-chars`), and the stored rationale is capped at 500 characters.
-- The model's output is only a classification. Even a successfully hijacked answer can at worst pick a different strategy, and strategy A is still gated by the deterministic Evaluator (🚧) before anything is replayed.
+- The model's output is only a classification. Even a successfully hijacked answer can at worst pick a different strategy, and strategy A is still gated by the deterministic Evaluator Gate before anything is replayed. The labelled evaluation saw exactly this: a fake notice in a stack trace steered one model's classification in every run, and the gate and the retry budget contained it (see [Labelled evaluation](#labelled-evaluation-phase-8)).
 
 ### Strategy B: transient retry
 When the planner classifies a failure as transient (connection reset, timeout, downstream unavailable), the data is fine and the same event is expected to succeed later. Strategy B never edits it. The model's only contribution is the classification; **how often and how long to retry is decided by code**, not by the model.
@@ -762,9 +762,9 @@ The Jaeger check also confirmed the exporter wiring: the four audit rows' `trace
 **What this does and does not show.**
 - It is a smoke-level check: one scenario per category, 6 in total. It shows that the prompts, structured-output parsing, tool wiring and gate work together with a real model. It is **not** an accuracy measurement, and it says nothing about messier real-world payloads or about other models.
 - The negative scenarios (garbage payload, ambiguous date, missing `customerId`) assert that the model or the gate *decided* to reject or hold the event (for the ambiguous date, either a decline or a repair carrying an `ambiguous` risk flag is accepted, since both are safe). They fail if the outcome was caused by an error. This guard exists because the first live run was wrong: a test-harness bug sent a dummy API key, every call returned 401, and the three negative scenarios "passed" only because the system fails closed on errors. The fix is in `AbstractIntegrationTest` (real key used when `DLQ_LIVE_LLM=true`) plus the `assertDecidedByTheModel` check.
-- A larger labelled set (dozens of drifted, transient and poison events, scored for routing accuracy and for how often the gate rejects a proposal) would be the next step toward a defensible quality claim.
+- The larger labelled set this section called for now exists: 106 cases, two models, scored for routing and for unsafe replays. See [Labelled evaluation](#labelled-evaluation-phase-8).
 
-🚧 Phase 8 adds a single end-to-end suite covering all three strategies (drifted payload, transient failure, poison pill). Today the poison pill (`QuarantineFlowIT`) and drifted payload (`RepairFlowIT`) paths are tested separately.
+Phase 8 delivered the labelled evaluation and the failure tests rather than one single end-to-end file. The paths are covered by `RepairFlowIT` (Strategy A), `TransientRetryFlowIT` (B), `QuarantineFlowIT` (C), `ApprovalFlowIT` (Tier 2), `MultiStreamIT` (several streams), `RedeliveryIT` and `ResilienceIT` (infrastructure failure), and the [labelled evaluation](#labelled-evaluation-phase-8).
 
 ## Configuration
 
