@@ -861,3 +861,5 @@ Managed by Flyway (`src/main/resources/db/migration`).
 ## License
 
 MIT, see [`LICENSE`](LICENSE). Copyright (c) 2026 Srikanth Ravindran.
+
+Contributions are welcome (see [`CONTRIBUTING.md`](CONTRIBUTING.md)); to report a security problem privately, see [`SECURITY.md`](SECURITY.md).
