@@ -27,3 +27,12 @@ ignore:
   - vulnerability: GHSA-8jxr-pr72-r468
     package:
       name: mcp-core
+
+  # Tomcat 10.1.62: CVE-2026-133325 (Critical), "Cluster TLS-PSK configured to use TLS 1.3 does not validate peer". It
+  # needs Tomcat clustering secured with TLS-PSK. This service is one embedded Tomcat with no cluster configuration,
+  # so it cannot be reached. The fix is in 10.1.63, which was not on Maven Central on 2026-11-26.
+  # expires-when-published: org.apache.tomcat.embed:tomcat-embed-core:10.1.63
+  # scripts/sca.sh fails as soon as that version exists: set tomcat.version in pom.xml to it, then delete this entry.
+  - vulnerability: CVE-2026-133325
+    package:
+      name: tomcat-embed-core

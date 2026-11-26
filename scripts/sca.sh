@@ -27,6 +27,21 @@ JAR="target/dlq-healing-agent-0.1.0-SNAPSHOT.jar"
 # Grype cannot create its database download files and fails with exit 1 on a fresh runner (empty cache).
 RUN_AS=(--user "$(id -u):$(id -g)" --tmpfs /tmp:rw,mode=1777 -e HOME=/tmp)
 
+# An ignore in .grype.yaml may carry a line "# expires-when-published: group:artifact:version". Once that version is on
+# Maven Central the ignore is stale: fail, so it is removed together with the version bump and not forgotten.
+# SCA_MAVEN_REPO exists so the check can be tested against a version that does exist.
+REPO="${SCA_MAVEN_REPO:-https://repo.maven.apache.org/maven2}"
+expired=0
+while read -r coords; do
+  IFS=: read -r group artifact version <<<"$coords"
+  url="$REPO/${group//.//}/$artifact/$version/$artifact-$version.pom"
+  if curl -fsI --max-time 20 "$url" >/dev/null 2>&1; then
+    echo "STALE IGNORE: $coords is now on Maven Central. Upgrade to it and delete the matching entry in .grype.yaml." >&2
+    expired=1
+  fi
+done < <(sed -n 's/^[[:space:]]*# expires-when-published:[[:space:]]*\([^[:space:]]*\).*/\1/p' .grype.yaml)
+[ "$expired" -eq 0 ] || exit 3
+
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 
 # Always rebuild from clean: a stale SBOM left in target/ once reported an old library version.
