@@ -26,7 +26,7 @@
             software-composition scan (Syft + Grype, see README) reports as vulnerable; the newer patch releases fix
             them and are drop-in. Remove an override once Boot's own managed version has caught up.
         -->
-        <tomcat.version>10.1.61</tomcat.version>              <!-- auth bypass / access control advisories in 10.1.55 -->
+        <tomcat.version>10.1.62</tomcat.version>              <!-- 10.1.61 has Critical/High advisories (CVE-2026-116561, -118028 and six more), fixed in 10.1.62 -->
         <jackson-bom.version>2.21.7</jackson-bom.version>     <!-- parser DoS advisories; this service parses untrusted JSON -->
         <postgresql.version>42.7.12</postgresql.version>      <!-- channel-binding downgrade -->
         <log4j2.version>2.25.5</log4j2.version>               <!-- log4j-api, via spring-boot-starter-logging -->
